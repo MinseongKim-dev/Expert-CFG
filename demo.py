@@ -13,10 +13,18 @@ from transformers import (
     TrainingArguments,
 )
 
+import datetime
+
 from src.datasets.radvqa import RADVQADataset
 from src.datasets.slakevqa import SLAKEVQADataset
 from src.datasets.pathvqa import PathVQADataset
 from src.highlighter_modules.guidance import ProbCFGLogitsProcessor
+from src.highlighter_modules.attention_phi3 import (
+    patch_phi3_attention,
+    set_highlight_mask,
+    clear_highlight_mask,
+)
+from src.highlighter_modules.uncertainty import compute_predictive_entropy
 
 
 # suggested deepspeed config
@@ -106,27 +114,28 @@ def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False)
     return model
 
 
+def _normalize_answer(ans: str) -> str:
+    """Lowercase + strip for exact-match comparison."""
+    return ans.lower().strip().strip('.')
+
+
 @torch.no_grad()
 def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=False):
     rank = int(os.environ.get('RANK', 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    world_size = int(os.environ.get('WORLD_SIZE', 1))
 
     model.eval()
-    answers_unique = []
-    generated_texts_unique = []
-
-    eval_dataset_shard = eval_dataset
+    results = []
 
     for i in tqdm(range(len(eval_dataset)), disable=(rank != 0) or disable_tqdm):
         # Phi-3-V currently only supports batch_size == 1
-        example = eval_dataset_shard[i]
-        answers_unique.append(example['answer'])
-        answers_unique.append(example['answer'])
+        example = eval_dataset[i]
         image = example['image']
         question = example['question']
+        gt_answer = example['answer']
         caption = example["top_k_captions"][0]
         highlights = example['highlights']
+
         prompt_message = {
             'role': 'user',
             'content': f'{caption} <|image_1|>\n{question}',
@@ -135,72 +144,103 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             [prompt_message], tokenize=False, add_generation_prompt=True
         )
 
-        qs_highlighted_parts = highlights
+        inputs = processor(
+            prompt, [image], return_tensors='pt', qs_highlighted_parts=highlights
+        ).to(f'cuda:{local_rank}')
 
-        inputs = processor(prompt, [image], return_tensors='pt', qs_highlighted_parts=qs_highlighted_parts).to(f'cuda:{local_rank}')
-        hl_mask_ = inputs['highlight_attention_mask'].float()
-        hl_mask_[hl_mask_ == 1] = args.perturb_weight
-        hl_mask_[hl_mask_ == 0] = args.attn
+        # Binary highlight mask for attention patch (Eq. 9-10)
+        binary_hl_mask = inputs['highlight_attention_mask'].float()  # [1, seq_len], 0 or 1
+        del inputs['highlight_attention_mask']
+
+        # CFG batch: [conditional, unconditional] (Eq. 8)
         cfg_batched_input = inputs['input_ids'].repeat(2, 1)
         pixel_values = inputs['pixel_values'].repeat(2, 1, 1, 1, 1)
         image_sizes = inputs['image_sizes'].repeat(2, 1)
+        # Standard attention mask for both branches; highlight bias applied via attention patch
+        attention_mask = inputs['attention_mask'].repeat(2, 1)
 
-        del inputs['highlight_attention_mask']
+        # Register highlight mask for the attention patch (cleared after generate)
+        if args.use_attn_patch:
+            set_highlight_mask(binary_hl_mask)
 
         generated_outputs = model.generate(
             input_ids=cfg_batched_input,
             pixel_values=pixel_values,
-            attention_mask=torch.cat([inputs['attention_mask'], hl_mask_], dim=0),
+            attention_mask=attention_mask,
             image_sizes=image_sizes,
             eos_token_id=processor.tokenizer.eos_token_id,
             max_new_tokens=64,
             num_beams=args.num_beams,
             logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
             output_scores=True,
-            return_dict_in_generate=True
+            return_dict_in_generate=True,
         )
 
+        if args.use_attn_patch:
+            clear_highlight_mask()
 
-        batch_index = 1
+        prompt_len = inputs['input_ids'].size(1)
+
+        # Decode conditional branch output (index 0)
         prediction = processor.batch_decode(
-            generated_outputs.sequences[:, inputs['input_ids'].size(1):],
+            generated_outputs.sequences[:1, prompt_len:],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
-        )
-        prediction = prediction[0].strip().strip('.')
+        )[0].strip().strip('.')
 
-        print('Question:', example['question'], 'GT:',example['answer'])
-        print('Prediction:', prediction)
+        # Per-token probabilities from conditional branch
         token_probs = []
-        generated_texts = []
-        for i, scores in enumerate(generated_outputs.scores):
-            probs = torch.softmax(scores, dim=-1)
-            generated_token_id = generated_outputs.sequences[batch_index, inputs['input_ids'].size(1) + len(token_probs)]
-            token_prob = probs[batch_index, generated_token_id].item()
-            token_probs.append(token_prob)
+        token_preds = []
+        for step_idx, step_scores in enumerate(generated_outputs.scores):
+            probs = torch.softmax(step_scores[0].float(), dim=-1)
+            token_id = generated_outputs.sequences[0, prompt_len + step_idx]
+            token_probs.append(probs[token_id].item())
+            token_preds.append(processor.decode(token_id))
 
-        # Print the decoded tokens and their probabilities
-        print("Generated text and token probabilities:")
-        for idx, prob in enumerate(token_probs):
-            token = processor.decode(generated_outputs.sequences[batch_index, inputs['input_ids'].size(1) + idx])
-            print(f"{token} - Probability: {prob}")
-            generated_texts.append(token)
+        # Predictive Entropy (Eq. 4) — length-normalised uncertainty measure
+        pe = compute_predictive_entropy(generated_outputs.scores)
 
-        update_information = {
-            'question': example['question'],
-            'answer': example['answer'],
+        correct = _normalize_answer(prediction) == _normalize_answer(gt_answer)
+
+        print(f'Q: {question}  GT: {gt_answer}  Pred: {prediction}  PE: {pe:.3f}  {"✓" if correct else "✗"}')
+
+        results.append({
+            'img_id': example.get('image_id', i),
+            'question': question,
+            'answer': gt_answer,
             'prediction': prediction,
+            'correct': correct,
+            'predictive_entropy': round(pe, 6),
             'token_probs': token_probs,
-            'token_preds': generated_texts
+            'token_preds': token_preds,
+        })
+
+    if rank == 0 and save_path:
+        # Wrap results with run metadata for cross-team comparison
+        correct_count = sum(r['correct'] for r in results)
+        output = {
+            'meta': {
+                'dataset': args.dataset,
+                'model': args.model_name_or_path,
+                'use_lora': args.use_lora,
+                'cfg': args.cfg,
+                'attn_beta': args.attn,
+                'perturb_weight': args.perturb_weight,
+                'use_attn_patch': args.use_attn_patch,
+                'num_beams': args.num_beams,
+                'timestamp': datetime.datetime.now().isoformat(),
+            },
+            'summary': {
+                'total': len(results),
+                'correct': correct_count,
+                'accuracy': round(correct_count / len(results), 4) if results else 0.0,
+            },
+            'results': results,
         }
-        generated_texts_unique.append(update_information)
-
-
-
-    if rank == 0:
-        if save_path:
-            with open(save_path, 'w') as f:
-                json.dump(generated_texts_unique, f, indent=4)
+        with open(save_path, 'w') as f:
+            json.dump(output, f, indent=2)
+        print(f'\nAccuracy: {correct_count}/{len(results)} = {output["summary"]["accuracy"]:.4f}')
+        print(f'Saved → {save_path}')
 
 
 
@@ -239,9 +279,14 @@ def main():
         help='Dataset to evaluate: vqa-rad | slake | pathvqa',
     )
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--cfg", type=float, default=1.5)
-    parser.add_argument("--attn", type=float, default=3.0)
-    parser.add_argument("--perturb_weight", type=float, default=0.01)
+    parser.add_argument("--cfg", type=float, default=1.5,
+                        help="CFG guidance scale γ (paper Eq. 8, default 1.5)")
+    parser.add_argument("--attn", type=float, default=3.0,
+                        help="Attention beta β for highlight activation (paper Eq. 9-10, default 3.0)")
+    parser.add_argument("--perturb_weight", type=float, default=0.01,
+                        help="Embedding perturbation α for unconditional branch (paper Eq. 7, default 0.01)")
+    parser.add_argument("--use_attn_patch", action="store_true",
+                        help="Apply highlight attention activation via Phi3Attention patch (Eq. 9-10)")
 
     args = parser.parse_args()
     args.attention_weight = args.attn
@@ -296,6 +341,14 @@ def main():
 
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     model = model.to(f'cuda:{local_rank}')
+
+    # Apply attention activation patch (Eq. 9-10) — requires eager attention, not flash
+    if args.use_attn_patch:
+        if args.use_flash_attention:
+            raise ValueError("--use_attn_patch is incompatible with --use_flash_attention. "
+                             "Remove --use_flash_attention to enable the attention patch.")
+        patch_phi3_attention(model, beta=args.attn)
+
     evaluate(
         model,
         processor,

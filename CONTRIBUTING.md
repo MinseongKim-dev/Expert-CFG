@@ -66,8 +66,11 @@ python demo.py \
 - `highlight_attention_mask` dtype 버그: `torch.long`으로 인해 `perturb_weight=0.01`이 0으로 잘리는 문제 → `.float()` 추가로 수정
 - `--dataset` 인자 추가: `RADVQADataset` 하드코딩 → `vqa-rad|slake|pathvqa` 선택 가능
 - `peft` 패키지 `requirements.txt` 누락 수정
+- Attention activation 구현 (`src/highlighter_modules/attention_phi3.py`): 논문 Eq. 9-10, `--use_attn_patch` 플래그로 활성화
+- Predictive Entropy 구현 (`src/highlighter_modules/uncertainty.py`): 논문 Eq. 4, 결과 json에 `predictive_entropy` 필드로 저장
+- 결과 출력 형식 통일: `{meta, summary, results}` 구조로 팀 간 비교 가능
+- `evaluate.py` 추가: 결과 json → accuracy 출력, 여러 파일 비교 지원
 
 ### 미구현 / 향후 작업
-- Attention forward 패치 누락: 논문 Eq. 9·10의 β/α 어텐션 activation은 `attention_mask`로 전달 불가 → LlamaAttention forward 패치 필요
-- Predictive Entropy(PE) 계산 없음: 현재 코드는 per-token 확률만 저장하며 PE 기반 CFG 전환 로직 없음
+- Embedding perturbation (Eq. 7): 무조건 분기의 하이라이트 토큰 임베딩에 α(=0.01) 곱하기 — Phi-3.5의 visual embedding 파이프라인과 연계 필요
 - RAG 미구현: `top_k_captions`와 `highlights`는 JSON에 미리 계산된 값을 사용 (BioMedCLIP + FAISS 파이프라인 미구현)
