@@ -14,6 +14,8 @@ from transformers import (
 )
 
 from src.datasets.radvqa import RADVQADataset
+from src.datasets.slakevqa import SLAKEVQADataset
+from src.datasets.pathvqa import PathVQADataset
 from src.highlighter_modules.guidance import ProbCFGLogitsProcessor
 
 
@@ -45,11 +47,17 @@ DS_CONFIG_DICT = {
 }
 
 
+DATASET_MAP = {
+    'vqa-rad': RADVQADataset,
+    'slake': SLAKEVQADataset,
+    'pathvqa': PathVQADataset,
+}
+
 def create_dataset(args):
-    output_file_test = args.input_json
-    img_root = args.img_root
-    eval_dataset = RADVQADataset(annotation_file=output_file_test, vis_root=img_root)
-    return eval_dataset
+    dataset_cls = DATASET_MAP.get(args.dataset)
+    if dataset_cls is None:
+        raise ValueError(f"Unknown dataset '{args.dataset}'. Choose from: {list(DATASET_MAP)}")
+    return dataset_cls(annotation_file=args.input_json, vis_root=args.img_root)
 
 
 
@@ -130,7 +138,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         qs_highlighted_parts = highlights
 
         inputs = processor(prompt, [image], return_tensors='pt', qs_highlighted_parts=qs_highlighted_parts).to(f'cuda:{local_rank}')
-        hl_mask_ = inputs['highlight_attention_mask']
+        hl_mask_ = inputs['highlight_attention_mask'].float()
         hl_mask_[hl_mask_ == 1] = args.perturb_weight
         hl_mask_[hl_mask_ == 0] = args.attn
         cfg_batched_input = inputs['input_ids'].repeat(2, 1)
@@ -223,6 +231,13 @@ def main():
     parser.add_argument('--lora_dropout', type=float, default=0.0, help='LoRA dropout')
     parser.add_argument('--freeze_vision_model', action='store_true', help='Freeze vision model')
 
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        choices=['vqa-rad', 'slake', 'pathvqa'],
+        required=True,
+        help='Dataset to evaluate: vqa-rad | slake | pathvqa',
+    )
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--cfg", type=float, default=1.5)
     parser.add_argument("--attn", type=float, default=3.0)
