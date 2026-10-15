@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model weights (large binaries)
+*.bin
+*.pt
+*.pth
+*.safetensors
+lora_weights/
+Phi-3*/
+Phi3*/
+
+# Data
+data/
+*.json.bak
+
+# Results / outputs (keep examples/)
+results/
+!examples/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
