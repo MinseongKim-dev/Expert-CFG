@@ -208,6 +208,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             'img_id': example.get('image_id', i),
             'question': question,
             'answer': gt_answer,
+            'answer_type': example.get('answer_type', 'OPEN'),  # CLOSED | OPEN
             'prediction': prediction,
             'correct': correct,
             'predictive_entropy': round(pe, 6),

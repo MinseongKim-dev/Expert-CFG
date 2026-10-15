@@ -30,34 +30,52 @@ def load_results(path: str) -> dict:
     return {'meta': meta, 'results': results, 'path': path}
 
 
+def _is_correct(result: dict) -> bool:
+    """Exact-match after lowercase+strip, matching standard MedVQA evaluation."""
+    pred = result.get('prediction', '').lower().strip().strip('.')
+    gt = result.get('answer', '').lower().strip().strip('.')
+    return pred == gt
+
+
 def compute_metrics(results: list[dict]) -> dict:
+    """Compute accuracy metrics matching the paper's evaluation format.
+
+    Splits by answer_type field (CLOSED / OPEN) which maps to:
+      CLOSED — yes/no binary questions
+      OPEN   — free-form / entity questions
+    """
     total = len(results)
     if total == 0:
         return {'total': 0, 'correct': 0, 'accuracy': 0.0}
 
-    correct = sum(1 for r in results if r.get('correct', False))
+    # Re-compute correct using consistent normalization
+    for r in results:
+        r['correct'] = _is_correct(r)
 
-    # Closed (yes/no) vs open breakdown — if 'question_type' field exists
-    closed = [r for r in results if r.get('question_type', '').lower() == 'closed']
-    open_q = [r for r in results if r.get('question_type', '').lower() == 'open']
+    correct = sum(1 for r in results if r['correct'])
 
-    metrics = {
+    # Closed vs open split — answer_type field from dataset JSON
+    closed = [r for r in results if r.get('answer_type', '').upper() == 'CLOSED']
+    open_q = [r for r in results if r.get('answer_type', '').upper() == 'OPEN']
+
+    metrics: dict = {
         'total': total,
         'correct': correct,
         'accuracy': round(correct / total, 4),
     }
 
     if closed:
-        c_correct = sum(1 for r in closed if r.get('correct', False))
+        c_correct = sum(1 for r in closed if r['correct'])
         metrics['closed_total'] = len(closed)
+        metrics['closed_correct'] = c_correct
         metrics['closed_accuracy'] = round(c_correct / len(closed), 4)
 
     if open_q:
-        o_correct = sum(1 for r in open_q if r.get('correct', False))
+        o_correct = sum(1 for r in open_q if r['correct'])
         metrics['open_total'] = len(open_q)
+        metrics['open_correct'] = o_correct
         metrics['open_accuracy'] = round(o_correct / len(open_q), 4)
 
-    # Average predictive entropy
     pes = [r['predictive_entropy'] for r in results if 'predictive_entropy' in r]
     if pes:
         metrics['mean_predictive_entropy'] = round(sum(pes) / len(pes), 4)
@@ -73,17 +91,27 @@ def format_run(path: str, meta: dict, metrics: dict) -> str:
     patch = '+attn' if meta.get('use_attn_patch') else ''
     tag = f"{dataset} | γ={cfg} | {lora}{patch}"
 
+    def acc_str(acc, n):
+        return f"{acc*100:.2f}%  (n={n})"
+
     lines = [
         f"  File   : {name}",
         f"  Config : {tag}",
-        f"  Total  : {metrics['total']}",
-        f"  Correct: {metrics['correct']}",
-        f"  Acc    : {metrics['accuracy']:.4f}  ({metrics['accuracy']*100:.2f}%)",
+        f"  ── Overall ─────────────────────────────",
+        f"  Total  : {metrics['total']}  Correct: {metrics['correct']}",
+        f"  Acc    : {metrics['accuracy']*100:.2f}%",
     ]
+
     if 'closed_accuracy' in metrics:
-        lines.append(f"  Closed : {metrics['closed_accuracy']:.4f}  (n={metrics['closed_total']})")
+        lines.append(
+            f"  Closed : {acc_str(metrics['closed_accuracy'], metrics['closed_total'])}"
+            f"  correct={metrics['closed_correct']}"
+        )
     if 'open_accuracy' in metrics:
-        lines.append(f"  Open   : {metrics['open_accuracy']:.4f}  (n={metrics['open_total']})")
+        lines.append(
+            f"  Open   : {acc_str(metrics['open_accuracy'], metrics['open_total'])}"
+            f"  correct={metrics['open_correct']}"
+        )
     if 'mean_predictive_entropy' in metrics:
         lines.append(f"  Mean PE: {metrics['mean_predictive_entropy']:.4f}")
 
@@ -112,18 +140,26 @@ def main():
         print(format_run(path, run['meta'], metrics))
 
     if len(all_metrics) > 1:
-        print('\n' + '═' * 50)
-        print('Comparison (accuracy)')
-        print('─' * 50)
-        header = f"{'Run':<30}  {'Dataset':<10}  {'Acc':>6}  {'CFG':>5}  {'LoRA':>4}  {'Patch':>5}"
+        print('\n' + '═' * 70)
+        print('Comparison  (논문 Table 형식 — Closed / Open / Overall)')
+        print('─' * 70)
+        header = (
+            f"{'Run':<28}  {'Dataset':<9}  "
+            f"{'Closed':>7}  {'Open':>7}  {'Overall':>8}  "
+            f"{'γ':>4}  {'LoRA':>4}  {'Attn':>4}"
+        )
         print(header)
+        print('─' * 70)
         for path, meta, m in all_metrics:
-            name = Path(path).stem[:28]
-            dataset = meta.get('dataset', '?')[:10]
+            name = Path(path).stem[:26]
+            dataset = meta.get('dataset', '?')[:9]
             cfg = str(meta.get('cfg', '?'))
             lora = 'Y' if meta.get('use_lora') else 'N'
             patch = 'Y' if meta.get('use_attn_patch') else 'N'
-            print(f"{name:<30}  {dataset:<10}  {m['accuracy']:>6.4f}  {cfg:>5}  {lora:>4}  {patch:>5}")
+            closed_s = f"{m['closed_accuracy']*100:.1f}%" if 'closed_accuracy' in m else '  —  '
+            open_s   = f"{m['open_accuracy']*100:.1f}%"   if 'open_accuracy'   in m else '  —  '
+            overall  = f"{m['accuracy']*100:.1f}%"
+            print(f"{name:<28}  {dataset:<9}  {closed_s:>7}  {open_s:>7}  {overall:>8}  {cfg:>4}  {lora:>4}  {patch:>4}")
 
     print('─' * 50)
 
