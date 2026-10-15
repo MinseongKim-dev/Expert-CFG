@@ -90,12 +90,13 @@ def freeze_vision_model(model):
         p.requires_grad_(False)
 
 
-def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False):
+def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False, use_bf16=False):
+    use_bfloat16 = use_flash_attention or use_bf16
     bnb_config = (
         BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type='nf4',
-            bnb_4bit_compute_dtype=torch.bfloat16 if use_flash_attention else torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16 if use_bfloat16 else torch.float16,
         )
         if use_qlora
         else None
@@ -105,7 +106,7 @@ def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False)
         model_name_or_path,
         # Phi-3-V is originally trained in bf16 + flash attn
         # For fp16 mixed precision training, load in f32 to avoid hf accelerate error
-        torch_dtype=torch.bfloat16 if use_flash_attention else torch.float32,
+        torch_dtype=torch.bfloat16 if use_bfloat16 else torch.float32,
         trust_remote_code=True,
         _attn_implementation='flash_attention_2' if use_flash_attention else 'eager',
         quantization_config=bnb_config,
@@ -276,8 +277,8 @@ def main():
         '--dataset',
         type=str,
         choices=['vqa-rad', 'slake', 'pathvqa'],
-        required=True,
-        help='Dataset to evaluate: vqa-rad | slake | pathvqa',
+        default='vqa-rad',
+        help='Dataset to evaluate: vqa-rad | slake | pathvqa (default: vqa-rad)',
     )
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--cfg", type=float, default=1.5,
@@ -312,6 +313,7 @@ def main():
             args.model_name_or_path,
             use_flash_attention=args.use_flash_attention,
             use_qlora=args.use_qlora,
+            use_bf16=args.bf16,
         )
 
     eval_dataset = create_dataset(args)
@@ -330,11 +332,12 @@ def main():
 
         # reload the model for inference
         # this part also serves as an example of how to load a trained model
+        use_bfloat16 = args.use_flash_attention or args.bf16
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             # Phi-3-V is originally trained in bf16 + flash attn
             # For fp16 mixed precision training, load in f32 to avoid hf accelerate error
-            torch_dtype=torch.bfloat16 if args.use_flash_attention else torch.float32,
+            torch_dtype=torch.bfloat16 if use_bfloat16 else torch.float32,
             trust_remote_code=True,
             _attn_implementation='flash_attention_2' if args.use_flash_attention else 'eager',
         )
