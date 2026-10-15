@@ -1,76 +1,220 @@
-# Contributing Guide
+# 팀 협업 가이드
 
-## 데이터셋 담당 분담
+> **Expert-CFG** 재현 프로젝트 — 팀원 온보딩 문서
 
-| 데이터셋 | 브랜치 이름 |
-|---------|------------|
-| VQA-RAD | `feat/vqa-rad` |
-| SLAKE | `feat/slake` |
-| PathVQA | `feat/pathvqa` |
+---
 
-각자 담당 데이터셋 브랜치에서만 작업하고 `main`으로 PR을 올립니다.
+## 1. 역할 분담
 
-## 브랜치 시작 방법
+| 이름 | 담당 데이터셋 | 브랜치 |
+|------|-------------|--------|
+| (팀원 A) | **VQA-RAD** | `feat/vqa-rad` |
+| (팀원 B) | **SLAKE** | `feat/slake` |
+| (팀원 C) | **PathVQA** | `feat/pathvqa` |
+
+각자 담당 브랜치에서 작업 → `main`으로 PR 올립니다.
+
+---
+
+## 2. 환경 세팅
+
+### 2-1. 패키지 설치
 
 ```bash
-# main 최신 상태에서 브랜치 생성
+pip install -r requirements.txt
+```
+
+### 2-2. 모델 가중치 다운로드 (HuggingFace)
+
+```bash
+pip install huggingface_hub
+bash scripts/download_weights.sh
+```
+
+> ⚠️ `scripts/download_weights.sh` 안의 `LORA_HF` 변수에 LoRA repo ID를 먼저 채워야 합니다.  
+> README > Pre-trained weights > **Phi-3.5V-Med: Huggingface** 링크에서 repo ID 확인
+
+**다운로드 후 디렉토리 구조:**
+```
+Expert-CFG/
+├── Phi-3.5-vision-instruct/      # 베이스 모델 (~8 GB)
+│   ├── config.json
+│   ├── model-00001-of-00002.safetensors
+│   └── ...
+└── lora_weights/
+    └── logs_phi35_pubmed_instruct/   # Medical LoRA 가중치
+        ├── adapter_config.json
+        └── adapter_model.safetensors
+```
+
+### 2-3. 데이터셋 준비 (Baiduyun)
+
+논문 저자가 제공하는 pre-extracted 파일이 필요합니다.  
+각 데이터셋에는 두 가지 파일이 필요합니다:
+
+| 파일 종류 | 내용 | 출처 |
+|----------|------|------|
+| Annotation JSON (features 포함) | `top_k_captions`, `highlights` 필드 포함 | Baiduyun (저자 제공) |
+| 이미지 | 원본 의료 이미지 | Baiduyun 또는 공식 데이터셋 |
+
+#### Baiduyun 링크 (README 참고)
+
+| 데이터셋 | Baiduyun 링크 |
+|---------|--------------|
+| PathVQA | README에서 확인 |
+| SLAKE | README에서 확인 |
+| VQA-RAD (RadVQA) | README에서 확인 |
+| BioMedCLIP features (공통) | README에서 확인 |
+
+> **Baiduyun 접근이 어려울 경우**: 저자에게 직접 이메일 문의하거나,  
+> 팀장이 다운로드 후 공유 드라이브(Google Drive 등)에 올려서 공유하세요.
+
+#### 다운로드 후 배치 위치
+
+```
+Expert-CFG/data/
+├── RadVQA/
+│   ├── test.json          # annotation + top_k_captions + highlights
+│   └── images/            # 이미지 파일들
+├── Slake/
+│   ├── test.json
+│   └── imgs/
+└── PathVQA/
+    ├── test.json
+    ├── test/              # 이미지 (split별 폴더)
+    └── val/
+```
+
+> **JSON 필드 확인**: annotation JSON 항목은 반드시 `top_k_captions`와 `highlights` 필드를 포함해야 합니다.  
+> 없으면 Expert-CFG가 작동하지 않고 기본 VQA만 실행됩니다.
+
+---
+
+## 3. 실행 방법
+
+### 3-1. 기본 실행 (논문 재현 메인 설정)
+
+```bash
+torchrun --nproc_per_node=1 demo.py \
+    --bf16 \
+    --use_lora \
+    --dataset <vqa-rad|slake|pathvqa> \
+    --input_json data/<DatasetDir>/test.json \
+    --img_root data/<DatasetDir>/images \
+    --save_path results/<dataset>_results.json \
+    --output_dir ./lora_weights/logs_phi35_pubmed_instruct \
+    --cfg 1.5
+```
+
+### 3-2. Ablation 4가지 설정
+
+논문 Table에 맞춰 4가지를 모두 실행해야 합니다:
+
+```bash
+DATASET=vqa-rad
+INPUT=data/RadVQA/test.json
+IMG=data/RadVQA/images
+LORA=./lora_weights/logs_phi35_pubmed_instruct
+
+# ① base + no-CFG (γ=1.0, LoRA 없음)
+torchrun --nproc_per_node=1 demo.py --bf16 \
+    --dataset $DATASET --input_json $INPUT --img_root $IMG \
+    --cfg 1.0 \
+    --save_path results/${DATASET}_1_base_noCFG.json
+
+# ② base + CFG (γ=1.5, LoRA 없음)
+torchrun --nproc_per_node=1 demo.py --bf16 \
+    --dataset $DATASET --input_json $INPUT --img_root $IMG \
+    --cfg 1.5 \
+    --save_path results/${DATASET}_2_base_CFG.json
+
+# ③ LoRA + no-CFG (γ=1.0)
+torchrun --nproc_per_node=1 demo.py --bf16 --use_lora \
+    --dataset $DATASET --input_json $INPUT --img_root $IMG \
+    --output_dir $LORA --cfg 1.0 \
+    --save_path results/${DATASET}_3_lora_noCFG.json
+
+# ④ LoRA + CFG = Expert-CFG 풀 설정 (γ=1.5)
+torchrun --nproc_per_node=1 demo.py --bf16 --use_lora \
+    --dataset $DATASET --input_json $INPUT --img_root $IMG \
+    --output_dir $LORA --cfg 1.5 \
+    --save_path results/${DATASET}_4_ExpertCFG.json
+```
+
+> `--use_attn_patch` 플래그를 추가하면 논문 Eq. 9-10 (attention highlight activation)도 활성화됩니다.  
+> 단, flash attention과 함께 사용 불가 — `--use_flash_attention` 빼고 실행하세요.
+
+### 3-3. 결과 평가 (논문 Table 형식)
+
+```bash
+# 단일 파일
+python evaluate.py results/vqa-rad_4_ExpertCFG.json
+
+# 4가지 ablation 비교표
+python evaluate.py \
+    results/vqa-rad_1_base_noCFG.json \
+    results/vqa-rad_2_base_CFG.json \
+    results/vqa-rad_3_lora_noCFG.json \
+    results/vqa-rad_4_ExpertCFG.json
+```
+
+출력 예시:
+```
+Run                           Dataset    Closed     Open  Overall     γ  LoRA  Attn
+vqa-rad_1_base_noCFG          vqa-rad    72.3%    45.1%    61.2%   1.0     N     N
+vqa-rad_4_ExpertCFG           vqa-rad    82.1%    55.6%    71.3%   1.5     Y     N
+```
+
+---
+
+## 4. 브랜치 작업 방법
+
+```bash
+# 브랜치 생성 (최신 main 기준)
 git fetch origin main
-git checkout -b feat/<dataset> origin/main
+git checkout -b feat/vqa-rad origin/main   # 본인 담당으로 변경
+
+# 작업 후 PR
+git add src/datasets/radvqa.py   # 본인 데이터셋 파일만
+git commit -m "[VQA-RAD] 설명"
+git push -u origin feat/vqa-rad
 ```
 
-## 실행 방법
+**수정 범위:**
+- ✅ 본인 담당 `src/datasets/<dataset>.py`
+- ✅ 본인 브랜치의 실험 결과 메모
+- ⚠️ `demo.py`, `evaluate.py`, `src/highlighter_modules/` 수정 시 → 다른 팀원에게 먼저 알리기
 
-```bash
-# VQA-RAD 예시
-python demo.py \
-  --dataset vqa-rad \
-  --input_json data/RadVQA/test.json \
-  --img_root data/RadVQA/images \
-  --model_name_or_path ./Phi-3.5-vision-instruct \
-  --save_path results/vqa-rad_results.json
+---
 
-# SLAKE 예시
-python demo.py \
-  --dataset slake \
-  --input_json data/Slake/test.json \
-  --img_root data/Slake/imgs \
-  ...
+## 5. Kaggle 환경에서 실행 (권장)
 
-# PathVQA 예시
-python demo.py \
-  --dataset pathvqa \
-  --input_json data/PathVQA/test.json \
-  --img_root data/PathVQA/images \
-  ...
-```
+로컬 GPU가 부족할 경우 Kaggle T4 (16GB) 무료 사용:
 
-## 각 데이터셋 파일 위치
+1. Kaggle Notebook → **GitHub 연결** 또는 `git clone`
+2. 모델/데이터를 Kaggle Dataset으로 업로드 후 마운트
+3. 위의 `torchrun` 명령어 그대로 실행
 
-- `src/datasets/radvqa.py` — VQA-RAD 로더
-- `src/datasets/slakevqa.py` — SLAKE 로더
-- `src/datasets/pathvqa.py` — PathVQA 로더
+---
 
-공용 파일(`demo.py`, `src/highlighter_modules/`)은 꼭 필요한 경우에만 수정하고, 수정 시 다른 팀원에게 미리 알립니다.
+## 6. 결과 공유 방법
 
-## PR 규칙
+결과 JSON 파일(`results/*.json`)은 `.gitignore`에 포함되어 있어 커밋되지 않습니다.  
+팀원 간 결과 공유는 다음 중 하나로:
 
-- PR 제목: `[VQA-RAD] 설명` / `[SLAKE] 설명` / `[PathVQA] 설명`
-- 결과 json 파일은 커밋하지 않습니다 (`.gitignore` 참고)
-- 리뷰어 최소 1명 지정
+- Google Drive / Slack 공유
+- `evaluate.py` 출력 텍스트를 PR description에 붙여넣기
 
-## 알려진 버그 및 현재 상태
+---
 
-코드베이스의 주요 버그와 논문-코드 불일치는 아래를 참고하세요.
+## 7. 현재 구현 상태
 
-### 수정 완료 (이 베이스라인에 반영)
-- `highlight_attention_mask` dtype 버그: `torch.long`으로 인해 `perturb_weight=0.01`이 0으로 잘리는 문제 → `.float()` 추가로 수정
-- `--dataset` 인자 추가: `RADVQADataset` 하드코딩 → `vqa-rad|slake|pathvqa` 선택 가능
-- `peft` 패키지 `requirements.txt` 누락 수정
-- Attention activation 구현 (`src/highlighter_modules/attention_phi3.py`): 논문 Eq. 9-10, `--use_attn_patch` 플래그로 활성화
-- Predictive Entropy 구현 (`src/highlighter_modules/uncertainty.py`): 논문 Eq. 4, 결과 json에 `predictive_entropy` 필드로 저장
-- 결과 출력 형식 통일: `{meta, summary, results}` 구조로 팀 간 비교 가능
-- `evaluate.py` 추가: 결과 json → accuracy 출력, 여러 파일 비교 지원
-
-### 미구현 / 향후 작업
-- Embedding perturbation (Eq. 7): 무조건 분기의 하이라이트 토큰 임베딩에 α(=0.01) 곱하기 — Phi-3.5의 visual embedding 파이프라인과 연계 필요
-- RAG 미구현: `top_k_captions`와 `highlights`는 JSON에 미리 계산된 값을 사용 (BioMedCLIP + FAISS 파이프라인 미구현)
+| 기능 | 상태 | 관련 파일 |
+|------|------|----------|
+| CFG 추론 (Eq. 8, γ=1.5) | ✅ 구현 | `src/highlighter_modules/guidance.py` |
+| Attention highlight (Eq. 9-10) | ✅ 구현 (`--use_attn_patch`) | `src/highlighter_modules/attention_phi3.py` |
+| Predictive Entropy (Eq. 4) | ✅ 구현 | `src/highlighter_modules/uncertainty.py` |
+| LoRA 로드 | ✅ 구현 (`--use_lora`) | `demo.py` |
+| Closed/Open accuracy 분리 평가 | ✅ 구현 | `evaluate.py` |
+| Embedding perturbation (Eq. 7) | ⬜ 미구현 | — |
+| RAG (BioMedCLIP 검색) | ⬜ 미구현 (pre-extracted 사용) | — |
