@@ -42,7 +42,7 @@ echo ""
 #    README의 HuggingFace 링크에서 실제 repo ID를 확인 후 아래를 수정하세요.
 # ──────────────────────────────────────────────────────────────
 LORA_DIR="$REPO_ROOT/lora_weights/logs_phi35_pubmed_instruct"
-LORA_HF="REPLACE_WITH_LORA_HUGGINGFACE_REPO_ID"   # ← README에서 확인 필요
+LORA_HF="ecoxial2007/Phi-3.5V-Med"   # HuggingFace repo ID
 
 echo "[2/2] LoRA 가중치 다운로드: $LORA_HF"
 echo "      저장 위치: $LORA_DIR"

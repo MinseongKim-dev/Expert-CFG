@@ -26,13 +26,16 @@ pip install -r requirements.txt
 
 ### 2-2. 모델 가중치 다운로드 (HuggingFace)
 
+**로컬 또는 Kaggle 환경에서 실행하세요** (이 레포의 클라우드 컨테이너에서는 huggingface.co 접근 불가).
+
 ```bash
 pip install huggingface_hub
 bash scripts/download_weights.sh
 ```
 
-> ⚠️ `scripts/download_weights.sh` 안의 `LORA_HF` 변수에 LoRA repo ID를 먼저 채워야 합니다.  
-> README > Pre-trained weights > **Phi-3.5V-Med: Huggingface** 링크에서 repo ID 확인
+스크립트에 repo ID가 이미 채워져 있습니다:
+- 베이스 모델: `microsoft/Phi-3.5-vision-instruct`
+- LoRA 가중치: `ecoxial2007/Phi-3.5V-Med`
 
 **다운로드 후 디렉토리 구조:**
 ```
