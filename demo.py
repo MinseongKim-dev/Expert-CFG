@@ -323,7 +323,7 @@ def main():
     assert args.batch_size % num_gpus == 0, 'Batch size must be divisible by the number of GPUs'
 
 
-    # eval after fine-tuning
+    # eval after fine-tuning (or 4-bit inference without LoRA)
     if args.use_lora:
         # first try to clear GPU memory
         del model
@@ -331,17 +331,25 @@ def main():
         torch.cuda.empty_cache()
 
         # reload the model for inference
-        # this part also serves as an example of how to load a trained model
         use_bfloat16 = args.use_flash_attention or args.bf16
+        bnb_config_reload = (
+            BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype=torch.bfloat16 if use_bfloat16 else torch.float16,
+            )
+            if args.use_qlora
+            else None
+        )
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            # Phi-3-V is originally trained in bf16 + flash attn
-            # For fp16 mixed precision training, load in f32 to avoid hf accelerate error
             torch_dtype=torch.bfloat16 if use_bfloat16 else torch.float32,
             trust_remote_code=True,
             _attn_implementation='flash_attention_2' if args.use_flash_attention else 'eager',
+            quantization_config=bnb_config_reload,
         )
-        model.load_adapter(args.output_dir)
+        if args.output_dir:
+            model.load_adapter(args.output_dir)
 
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     model = model.to(f'cuda:{local_rank}')
