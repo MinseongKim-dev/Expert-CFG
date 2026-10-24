@@ -313,7 +313,7 @@ class Phi3VProcessor(ProcessorMixin):
     def __init__(self, image_processor, tokenizer):
         self.image_processor = image_processor
         self.tokenizer = tokenizer
-        self.num_img_tokens = image_processor.num_img_tokens
+        self.num_img_tokens = getattr(image_processor, 'num_img_tokens', 144)
         self.img_tokens = [f"<|image_{i+1}|>" for i in range(1000000)]
 
     def __call__(
