@@ -39,7 +39,8 @@ def _is_correct(result: dict) -> bool:
         return True
     if answer_type == 'CLOSED' or gt in ('yes', 'no'):
         return (pred.split()[0].rstrip(',.!?;:') == gt) if pred else False
-    return gt in pred or pred in gt
+    # Open: exact match only (논문 표준 VQA-RAD 평가)
+    return False
 
 
 def compute_metrics(results: list[dict]) -> dict:

@@ -128,8 +128,8 @@ def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> b
     # Closed (yes/no): match on first word of prediction
     if answer_type == 'CLOSED' or gt in ('yes', 'no'):
         return pred.split()[0].rstrip(',.!?;:') == gt if pred else False
-    # Open: GT appears in prediction or prediction appears in GT
-    return gt in pred or pred in gt
+    # Open: exact match only (논문 표준 VQA-RAD 평가)
+    return False
 
 
 @torch.no_grad()
