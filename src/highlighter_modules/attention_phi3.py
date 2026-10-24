@@ -9,6 +9,9 @@ Usage:
     patch_phi3_attention(model, beta=3.0)   # once after model load
     set_highlight_mask(binary_mask)          # before each model.generate()
     clear_highlight_mask()                   # after each model.generate()
+
+Compatibility: transformers >= 4.43 (does not rely on transformers' apply_rotary_pos_emb
+or repeat_kv, which changed API in 4.44+).
 """
 
 import math
@@ -23,11 +26,6 @@ _BETA: float = 3.0
 
 
 def set_highlight_mask(mask: torch.Tensor) -> None:
-    """Register highlight mask for the next generation call.
-
-    Args:
-        mask: [1, seq_len] float tensor with 1 at highlighted token positions.
-    """
     global _HL_MASK
     _HL_MASK = mask
 
@@ -35,6 +33,32 @@ def set_highlight_mask(mask: torch.Tensor) -> None:
 def clear_highlight_mask() -> None:
     global _HL_MASK
     _HL_MASK = None
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary(q, k, cos, sin):
+    """Apply rotary embeddings; cos/sin are [batch, seq, head_dim] (already position-indexed)."""
+    cos = cos.unsqueeze(1)  # [bs, 1, seq, head_dim]
+    sin = sin.unsqueeze(1)
+    q_embed = (q * cos) + (_rotate_half(q) * sin)
+    k_embed = (k * cos) + (_rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_kv_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    return (
+        hidden_states[:, :, None, :, :]
+        .expand(batch, num_kv_heads, n_rep, slen, head_dim)
+        .reshape(batch, num_kv_heads * n_rep, slen, head_dim)
+    )
 
 
 def _phi3_hl_forward(
@@ -49,7 +73,6 @@ def _phi3_hl_forward(
     **kwargs,
 ):
     """Replacement forward for Phi3Attention that injects highlight-based attention bias."""
-    from transformers.models.phi3.modeling_phi3 import apply_rotary_pos_emb, repeat_kv
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -58,23 +81,29 @@ def _phi3_hl_forward(
     q_size = self.num_heads * self.head_dim
     kv_size = self.num_key_value_heads * self.head_dim
     query_states = qkv[..., :q_size]
-    key_states = qkv[..., q_size: q_size + kv_size]
-    value_states = qkv[..., q_size + kv_size:]
+    key_states = qkv[..., q_size : q_size + kv_size]
+    value_states = qkv[..., q_size + kv_size :]
 
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-    # --- Rotary embeddings ---
+    # --- KV sequence length (compatible with DynamicCache 4.43 and 4.44+) ---
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
-        if hasattr(past_key_value, 'get_usable_length'):
+        if hasattr(past_key_value, 'get_seq_length'):
+            kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
+        elif hasattr(past_key_value, 'get_usable_length'):
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         elif isinstance(past_key_value, tuple):
             kv_seq_len += past_key_value[0].shape[-2]
 
+    # --- Rotary embeddings ---
+    # Use the model's own rotary_emb (self-contained in modeling_phi3_v.py).
+    # Do NOT import apply_rotary_pos_emb from transformers — its API changed in 4.44+
+    # and is incompatible with the custom RotaryEmbedding's output shape.
     cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+    query_states, key_states = _apply_rotary(query_states, key_states, cos, sin)
 
     # --- KV cache update ---
     if past_key_value is not None:
@@ -90,8 +119,8 @@ def _phi3_hl_forward(
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
             past_key_value = (key_states, value_states)
 
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+    key_states = _repeat_kv(key_states, self.num_key_value_groups)
+    value_states = _repeat_kv(value_states, self.num_key_value_groups)
 
     # --- Attention weights ---
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
@@ -105,19 +134,15 @@ def _phi3_hl_forward(
         kv_len = attn_weights.shape[-1]
         prompt_len = _HL_MASK.shape[-1]
 
-        # Align mask length to current kv length (grows with KV cache during decoding)
         if kv_len <= prompt_len:
             hl = _HL_MASK[..., :kv_len]
         else:
             pad = torch.zeros(1, kv_len - prompt_len, device=_HL_MASK.device, dtype=_HL_MASK.dtype)
             hl = torch.cat([_HL_MASK, pad], dim=-1)
 
-        # [1, 1, 1, kv_len] broadcasts over [bs, num_heads, q_len, kv_len]
-        hl = hl.unsqueeze(1).unsqueeze(1)
+        hl = hl.unsqueeze(1).unsqueeze(1)  # [1, 1, 1, kv_len]
 
-        # Conditional branch: attend MORE to highlighted tokens
         attn_weights[:bs] = attn_weights[:bs] + log_beta * hl
-        # Unconditional branch: attend LESS to highlighted tokens
         attn_weights[bs:] = attn_weights[bs:] - delta * hl
 
     # --- Standard attention mask (causal + padding) ---
@@ -142,8 +167,8 @@ def _phi3_hl_forward(
 def patch_phi3_attention(model, beta: float = 3.0) -> int:
     """Monkey-patch all Phi3Attention layers in the model.
 
-    Must be called after model.load() and before evaluate().
-    Requires model loaded with _attn_implementation='eager'.
+    Works with both standard transformers Phi3Attention and custom trust_remote_code
+    variants (e.g. Phi3VAttention from modeling_phi3_v.py).
 
     Args:
         model: AutoModelForCausalLM instance (Phi-3 or Phi-3.5).
@@ -155,14 +180,10 @@ def patch_phi3_attention(model, beta: float = 3.0) -> int:
     global _BETA
     _BETA = beta
 
-    try:
-        from transformers.models.phi3.modeling_phi3 import Phi3Attention
-    except ImportError:
-        raise ImportError("transformers Phi3Attention not found. Ensure transformers>=4.36 is installed.")
-
     patched = 0
     for module in model.modules():
-        if isinstance(module, Phi3Attention):
+        # Match by class name to work with trust_remote_code custom classes
+        if type(module).__name__ == 'Phi3Attention':
             module.forward = types.MethodType(_phi3_hl_forward, module)
             patched += 1
 
