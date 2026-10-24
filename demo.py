@@ -287,6 +287,12 @@ def main():
         default='./Phi-3.5-vision-instruct',
         help='Model name or path to load from',
     )
+    parser.add_argument(
+        '--processor_path',
+        type=str,
+        default=None,
+        help='Path to processor (if different from model_name_or_path, e.g. custom processor dir)',
+    )
     parser.add_argument('--use_flash_attention', action='store_true', help='Use Flash Attention')
     parser.add_argument('--bf16', action='store_true', help='Use BF16')
     parser.add_argument('--use_lora', action='store_true', help='Use LoRA')
@@ -342,8 +348,9 @@ def main():
     accelerator = Accelerator(dataloader_config)
 
     with accelerator.local_main_process_first():
+        processor_path = args.processor_path or args.model_name_or_path
         processor = AutoProcessor.from_pretrained(
-            args.model_name_or_path, trust_remote_code=True, num_crops=args.num_crops
+            processor_path, trust_remote_code=True, num_crops=args.num_crops
         )
         model = create_model(
             args.model_name_or_path,

@@ -168,6 +168,8 @@ def main():
     parser.add_argument('--top_k_pct', type=float, default=5.0,
                         help='Top k%% of samples by PE to rerun (default 5.0)')
     parser.add_argument('--model_name_or_path', type=str, default='./Phi-3.5-vision-instruct')
+    parser.add_argument('--processor_path', type=str, default=None,
+                        help='Path to processor (if different from model_name_or_path)')
     parser.add_argument('--input_json', type=str, required=True)
     parser.add_argument('--img_root', type=str, required=True)
     parser.add_argument('--dataset', type=str, choices=['vqa-rad', 'slake', 'pathvqa'], default='vqa-rad')
@@ -206,8 +208,9 @@ def main():
     )
 
     print(f'Loading model: {args.model_name_or_path}')
+    processor_path = args.processor_path or args.model_name_or_path
     processor = AutoProcessor.from_pretrained(
-        args.model_name_or_path, trust_remote_code=True, num_crops=args.num_crops
+        processor_path, trust_remote_code=True, num_crops=args.num_crops
     )
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
