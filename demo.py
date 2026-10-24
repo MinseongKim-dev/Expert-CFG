@@ -233,6 +233,27 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
     if rank == 0 and save_path:
         # Wrap results with run metadata for cross-team comparison
         correct_count = sum(r['correct'] for r in results)
+        closed = [r for r in results if r.get('answer_type', '').upper() == 'CLOSED']
+        open_q = [r for r in results if r.get('answer_type', '').upper() == 'OPEN']
+        summary = {
+            'total': len(results),
+            'correct': correct_count,
+            'accuracy': round(correct_count / len(results), 4) if results else 0.0,
+        }
+        if closed:
+            c_correct = sum(r['correct'] for r in closed)
+            summary.update({
+                'closed_total': len(closed),
+                'closed_correct': c_correct,
+                'closed_accuracy': round(c_correct / len(closed), 4),
+            })
+        if open_q:
+            o_correct = sum(r['correct'] for r in open_q)
+            summary.update({
+                'open_total': len(open_q),
+                'open_correct': o_correct,
+                'open_accuracy': round(o_correct / len(open_q), 4),
+            })
         output = {
             'meta': {
                 'dataset': args.dataset,
@@ -247,11 +268,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
                 'num_beams': args.num_beams,
                 'timestamp': datetime.datetime.now().isoformat(),
             },
-            'summary': {
-                'total': len(results),
-                'correct': correct_count,
-                'accuracy': round(correct_count / len(results), 4) if results else 0.0,
-            },
+            'summary': summary,
             'results': results,
         }
         with open(save_path, 'w') as f:
