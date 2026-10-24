@@ -42,20 +42,26 @@ class RADVQADataset(Dataset):
 
         question = ann['question']
         answer = ann['answer']
+        answer_type = (
+            'CLOSED' if answer.lower().strip() in ('yes', 'no')
+            else ann.get("answer_type", "OPEN")
+        )
         try:
             return {
                 "image": image,
                 "question": question,
                 "answer": answer,
+                "answer_type": answer_type,
                 "image_id": self.img_ids[ann["img_id"]],
                 "top_k_captions": ann["top_k_captions"],
-                "highlights": ann['highlights']
+                "highlights": ann['highlights'],
             }
         except:
             return {
                 "image": image,
                 "question": question,
                 "answer": answer,
+                "answer_type": answer_type,
                 "image_id": self.img_ids[ann["img_id"]],
             }
 

@@ -48,15 +48,17 @@ class SLAKEVQADataset(Dataset):
                 "image": image,
                 "question": question,
                 "answer": answer,
+                "answer_type": ann.get("answer_type", "OPEN"),
                 "image_id": self.img_ids[ann["img_id"]],
                 "top_k_captions": ann["top_k_captions"],
-                "highlights": ann['highlights']
+                "highlights": ann['highlights'],
             }
         except:
             return {
                 "image": image,
                 "question": question,
                 "answer": answer,
+                "answer_type": ann.get("answer_type", "OPEN"),
                 "image_id": self.img_ids[ann["img_id"]],
             }
 

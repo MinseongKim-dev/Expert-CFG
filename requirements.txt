@@ -1,4 +1,4 @@
-flash_attn==2.5.8
+# flash_attn==2.5.8  # optional: only needed with --use_flash_attention (incompatible with --use_attn_patch)
 numpy==1.24.4
 Pillow==10.3.0
 Requests==2.31.0
@@ -6,3 +6,4 @@ torch==2.3.0
 torchvision==0.18.0
 transformers==4.43.0
 accelerate==0.30.0
+peft==0.11.1
