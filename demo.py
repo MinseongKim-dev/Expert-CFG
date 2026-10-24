@@ -150,7 +150,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
 
         prompt_message = {
             'role': 'user',
-            'content': f'{caption} <|image_1|>\n{question}',
+            'content': f'{caption} <|image_1|>\n{question}' if not args.no_rag else f'<|image_1|>\n{question}',
         }
         prompt = processor.tokenizer.apply_chat_template(
             [prompt_message], tokenize=False, add_generation_prompt=True
@@ -301,6 +301,8 @@ def main():
                         help="Embedding perturbation α for unconditional branch (paper Eq. 7, default 0.01)")
     parser.add_argument("--use_attn_patch", action="store_true",
                         help="Apply highlight attention activation via Phi3Attention patch (Eq. 9-10)")
+    parser.add_argument("--no_rag", action="store_true",
+                        help="Disable RAG: omit retrieved caption from prompt (pure baseline)")
 
     args = parser.parse_args()
     args.attention_weight = args.attn
