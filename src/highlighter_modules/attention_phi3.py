@@ -183,7 +183,7 @@ def patch_phi3_attention(model, beta: float = 3.0) -> int:
     patched = 0
     for module in model.modules():
         # Match by class name to work with trust_remote_code custom classes
-        if type(module).__name__ == 'Phi3Attention':
+        if (hasattr(module, 'qkv_proj') and hasattr(module, 'o_proj') and hasattr(module, 'rotary_emb')):
             module.forward = types.MethodType(_phi3_hl_forward, module)
             patched += 1
 
