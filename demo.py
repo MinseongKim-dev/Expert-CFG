@@ -116,8 +116,19 @@ def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False,
 
 
 def _normalize_answer(ans: str) -> str:
-    """Lowercase + strip for exact-match comparison."""
-    return ans.lower().strip().strip('.')
+    return ans.lower().strip().rstrip('.')
+
+
+def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> bool:
+    pred = _normalize_answer(prediction)
+    gt = _normalize_answer(gt_answer)
+    if pred == gt:
+        return True
+    # Closed (yes/no): match on first word of prediction
+    if answer_type == 'CLOSED' or gt in ('yes', 'no'):
+        return pred.split()[0] == gt if pred else False
+    # Open: GT appears in prediction or prediction appears in GT
+    return gt in pred or pred in gt
 
 
 @torch.no_grad()
@@ -202,7 +213,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         # Predictive Entropy (Eq. 4) — length-normalised uncertainty measure
         pe = compute_predictive_entropy(generated_outputs.scores)
 
-        correct = _normalize_answer(prediction) == _normalize_answer(gt_answer)
+        correct = _is_correct(prediction, gt_answer, example.get('answer_type', 'OPEN'))
 
         print(f'Q: {question}  GT: {gt_answer}  Pred: {prediction}  PE: {pe:.3f}  {"✓" if correct else "✗"}')
 
