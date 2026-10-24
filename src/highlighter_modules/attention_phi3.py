@@ -42,9 +42,13 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_rotary(q, k, cos, sin):
-    """Apply rotary embeddings; cos/sin are [batch, seq, head_dim] (already position-indexed)."""
-    cos = cos.unsqueeze(1)  # [bs, 1, seq, head_dim]
-    sin = sin.unsqueeze(1)
+    """Apply rotary embeddings. Supports cos/sin shaped [seq, head_dim] or [batch, seq, head_dim]."""
+    if cos.ndim == 2:
+        cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, head_dim]
+        sin = sin.unsqueeze(0).unsqueeze(0)
+    else:
+        cos = cos.unsqueeze(1)  # [batch, 1, seq, head_dim]
+        sin = sin.unsqueeze(1)
     q_embed = (q * cos) + (_rotate_half(q) * sin)
     k_embed = (k * cos) + (_rotate_half(k) * sin)
     return q_embed, k_embed
