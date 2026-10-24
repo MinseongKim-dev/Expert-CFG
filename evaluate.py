@@ -38,7 +38,7 @@ def _is_correct(result: dict) -> bool:
     if pred == gt:
         return True
     if answer_type == 'CLOSED' or gt in ('yes', 'no'):
-        return (pred.split()[0] == gt) if pred else False
+        return (pred.split()[0].rstrip(',.!?;:') == gt) if pred else False
     return gt in pred or pred in gt
 
 

@@ -127,7 +127,7 @@ def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> b
         return True
     # Closed (yes/no): match on first word of prediction
     if answer_type == 'CLOSED' or gt in ('yes', 'no'):
-        return pred.split()[0] == gt if pred else False
+        return pred.split()[0].rstrip(',.!?;:') == gt if pred else False
     # Open: GT appears in prediction or prediction appears in GT
     return gt in pred or pred in gt
 
