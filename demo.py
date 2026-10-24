@@ -154,31 +154,32 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         del inputs['highlight_attention_mask']
 
         # CFG batch: [conditional, unconditional] (Eq. 8)
-        cfg_batched_input = inputs['input_ids'].repeat(2, 1)
-        pixel_values = inputs['pixel_values'].repeat(2, 1, 1, 1, 1)
-        image_sizes = inputs['image_sizes'].repeat(2, 1)
-        # Standard attention mask for both branches; highlight bias applied via attention patch
-        attention_mask = inputs['attention_mask'].repeat(2, 1)
+        # Use expand (no copy) since both branches share identical inputs
+        cfg_batched_input = inputs['input_ids'].expand(2, -1)
+        pixel_values = inputs['pixel_values'].expand(2, *inputs['pixel_values'].shape[1:])
+        image_sizes = inputs['image_sizes'].expand(2, *inputs['image_sizes'].shape[1:])
+        attention_mask = inputs['attention_mask'].expand(2, -1)
 
         # Register highlight mask for the attention patch (cleared after generate)
         if args.use_attn_patch:
             set_highlight_mask(binary_hl_mask)
 
-        generated_outputs = model.generate(
-            input_ids=cfg_batched_input,
-            pixel_values=pixel_values,
-            attention_mask=attention_mask,
-            image_sizes=image_sizes,
-            eos_token_id=processor.tokenizer.eos_token_id,
-            max_new_tokens=64,
-            num_beams=args.num_beams,
-            logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
-            output_scores=True,
-            return_dict_in_generate=True,
-        )
-
-        if args.use_attn_patch:
-            clear_highlight_mask()
+        try:
+            generated_outputs = model.generate(
+                input_ids=cfg_batched_input,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
+                image_sizes=image_sizes,
+                eos_token_id=processor.tokenizer.eos_token_id,
+                max_new_tokens=32,
+                num_beams=args.num_beams,
+                logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
+                output_scores=True,
+                return_dict_in_generate=True,
+            )
+        finally:
+            if args.use_attn_patch:
+                clear_highlight_mask()
 
         prompt_len = inputs['input_ids'].size(1)
 
