@@ -58,8 +58,8 @@ def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> b
         return True
     if answer_type == 'CLOSED' or gt in ('yes', 'no'):
         return pred.split()[0].rstrip(',.!?;:') == gt if pred else False
-    # Open: exact match only (논문 표준 VQA-RAD 평가)
-    return False
+    # Open: GT가 prediction 안에 포함되면 정답 (VQA-RAD verbose 답변 대응)
+    return g in p
 
 
 def select_top_k(baseline_results: list, top_k_pct: float) -> set:
