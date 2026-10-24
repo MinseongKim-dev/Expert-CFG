@@ -75,7 +75,7 @@ def select_top_k(baseline_results: list, top_k_pct: float) -> set:
 
 @torch.no_grad()
 def rerun_selected(model, processor, eval_dataset, selected_indices, args):
-    device = f'cuda:{int(os.environ.get("LOCAL_RANK", 0))}' if torch.cuda.is_available() else 'cpu'
+    device = next(model.parameters()).device
     model.eval()
     results = []
 
