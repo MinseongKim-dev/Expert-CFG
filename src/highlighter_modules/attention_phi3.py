@@ -168,6 +168,51 @@ def _phi3_hl_forward(
     return attn_output, attn_weights, past_key_value
 
 
+# ── Embedding Perturbation (Eq. 7) ──────────────────────────────────────────
+_ALPHA: float = 0.01
+_EMBED_HOOK_HANDLE = None
+
+
+def _embedding_perturb_hook(module, input, output):
+    """Scale highlighted token embeddings in the unconditional branch by α (Eq. 7).
+
+    c̃_i = α · f(x_i) for highlighted tokens (m_i = 1)
+    c̃_i = f(x_i)     for non-highlighted tokens (m_i = 0)
+
+    Only applied during prompt encoding (seq_len == prompt_len); skips decode steps.
+    """
+    if _HL_MASK is None:
+        return output
+    bsz = output.shape[0]
+    if bsz < 2:
+        return output
+    seq_len = output.shape[1]
+    if seq_len != _HL_MASK.shape[-1]:
+        return output
+    bs = bsz // 2
+    hl = _HL_MASK.to(output.device).unsqueeze(-1)  # [1, seq_len, 1]
+    scale = 1.0 - (1.0 - _ALPHA) * hl             # 1 for m_i=0, α for m_i=1
+    output = output.clone()
+    output[bs:] = output[bs:] * scale
+    return output
+
+
+def patch_phi3_embedding(model, alpha: float = 0.01) -> None:
+    """Register Eq. 7 embedding perturbation hook on the token embedding layer."""
+    global _ALPHA, _EMBED_HOOK_HANDLE
+    _ALPHA = alpha
+    _EMBED_HOOK_HANDLE = model.model.embed_tokens.register_forward_hook(_embedding_perturb_hook)
+    print(f"[attention_phi3] Registered embedding perturbation hook (alpha={alpha})")
+
+
+def clear_embedding_hook() -> None:
+    """Remove the embedding perturbation hook."""
+    global _EMBED_HOOK_HANDLE
+    if _EMBED_HOOK_HANDLE is not None:
+        _EMBED_HOOK_HANDLE.remove()
+        _EMBED_HOOK_HANDLE = None
+
+
 def patch_phi3_attention(model, beta: float = 3.0) -> int:
     """Monkey-patch all Phi3Attention layers in the model.
 

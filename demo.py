@@ -21,6 +21,7 @@ from src.datasets.pathvqa import PathVQADataset
 from src.highlighter_modules.guidance import ProbCFGLogitsProcessor
 from src.highlighter_modules.attention_phi3 import (
     patch_phi3_attention,
+    patch_phi3_embedding,
     set_highlight_mask,
     clear_highlight_mask,
 )
@@ -241,6 +242,8 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
                 'attn_beta': args.attn,
                 'perturb_weight': args.perturb_weight,
                 'use_attn_patch': args.use_attn_patch,
+                'use_embed_perturb': args.use_embed_perturb,
+                'no_rag': args.no_rag,
                 'num_beams': args.num_beams,
                 'timestamp': datetime.datetime.now().isoformat(),
             },
@@ -301,6 +304,8 @@ def main():
                         help="Embedding perturbation α for unconditional branch (paper Eq. 7, default 0.01)")
     parser.add_argument("--use_attn_patch", action="store_true",
                         help="Apply highlight attention activation via Phi3Attention patch (Eq. 9-10)")
+    parser.add_argument("--use_embed_perturb", action="store_true",
+                        help="Apply embedding perturbation to unconditional branch (paper Eq. 7, alpha=perturb_weight)")
     parser.add_argument("--no_rag", action="store_true",
                         help="Disable RAG: omit retrieved caption from prompt (pure baseline)")
 
@@ -375,6 +380,10 @@ def main():
             raise ValueError("--use_attn_patch is incompatible with --use_flash_attention. "
                              "Remove --use_flash_attention to enable the attention patch.")
         patch_phi3_attention(model, beta=args.attn)
+
+    # Apply embedding perturbation hook (Eq. 7)
+    if args.use_embed_perturb:
+        patch_phi3_embedding(model, alpha=args.perturb_weight)
 
     evaluate(
         model,

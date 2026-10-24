@@ -31,10 +31,15 @@ def load_results(path: str) -> dict:
 
 
 def _is_correct(result: dict) -> bool:
-    """Exact-match after lowercase+strip, matching standard MedVQA evaluation."""
-    pred = result.get('prediction', '').lower().strip().strip('.')
-    gt = result.get('answer', '').lower().strip().strip('.')
-    return pred == gt
+    """Smart match matching demo.py evaluation: first-word for CLOSED, substring for OPEN."""
+    pred = result.get('prediction', '').lower().strip().rstrip('.')
+    gt = result.get('answer', '').lower().strip().rstrip('.')
+    answer_type = result.get('answer_type', 'OPEN')
+    if pred == gt:
+        return True
+    if answer_type == 'CLOSED' or gt in ('yes', 'no'):
+        return (pred.split()[0] == gt) if pred else False
+    return gt in pred or pred in gt
 
 
 def compute_metrics(results: list[dict]) -> dict:
