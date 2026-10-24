@@ -209,19 +209,23 @@ def main():
     processor = AutoProcessor.from_pretrained(
         args.model_name_or_path, trust_remote_code=True, num_crops=args.num_crops
     )
+    n_gpus = torch.cuda.device_count()
+    device_map = 'auto' if n_gpus > 1 else None
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16 if use_bf16 else torch.float32,
         trust_remote_code=True,
         _attn_implementation='eager',
         quantization_config=bnb_cfg,
+        device_map=device_map,
     )
     if args.use_qlora and args.output_dir:
         model.load_adapter(args.output_dir)
         print(f'Loaded LoRA: {args.output_dir}')
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = model.to(device)
+    if n_gpus <= 1:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = model.to(device)
 
     if args.use_attn_patch:
         patch_phi3_attention(model, beta=args.attn)
