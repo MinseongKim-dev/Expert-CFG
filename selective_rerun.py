@@ -125,7 +125,7 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
                 attention_mask=attention_mask,
                 image_sizes=image_sizes,
                 eos_token_id=processor.tokenizer.eos_token_id,
-                max_new_tokens=32,
+                max_new_tokens=64,
                 num_beams=1,
                 logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
                 output_scores=True,

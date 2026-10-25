@@ -196,7 +196,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
                 attention_mask=attention_mask,
                 image_sizes=image_sizes,
                 eos_token_id=processor.tokenizer.eos_token_id,
-                max_new_tokens=32,
+                max_new_tokens=64,
                 num_beams=args.num_beams,
                 logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
                 output_scores=True,
