@@ -246,6 +246,13 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             'token_preds': token_preds,
         })
 
+        # 500개마다 중간 저장
+        if rank == 0 and save_path and (i + 1) % 500 == 0:
+            ckpt_path = save_path.replace('.json', f'_ckpt{i+1}.json')
+            with open(ckpt_path, 'w') as _f:
+                json.dump({'results': results}, _f)
+            print(f'[ckpt] {i+1}개 저장 → {ckpt_path}')
+
     if rank == 0 and save_path:
         closed = [r for r in results if r.get('answer_type', '').upper() == 'CLOSED']
         open_q = [r for r in results if r.get('answer_type', '').upper() == 'OPEN']
