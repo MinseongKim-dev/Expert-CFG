@@ -48,15 +48,42 @@ def load_biomedclip():
 
 
 @torch.no_grad()
-def extract_image_features(model, preprocess, images, device, batch_size=64):
-    """PIL Image 리스트 → numpy feature matrix (N, D)"""
+def extract_image_features(model, preprocess, images, device,
+                           batch_size=64, checkpoint_path=None):
+    """PIL Image 리스트 → numpy feature matrix (N, D).
+
+    checkpoint_path: .npy 경로. 배치마다 덮어쓰며 저장해두고,
+    재실행 시 이미 완료된 배치는 건너뜁니다.
+    """
+    total = len(images)
+    feat_dim = None
+
+    # 기존 체크포인트 로드
+    done_batches = 0
     all_feats = []
-    for i in tqdm(range(0, len(images), batch_size), desc='BioMedCLIP 피처 추출'):
+    if checkpoint_path and Path(checkpoint_path).exists():
+        saved = np.load(checkpoint_path)
+        done_batches = len(saved) // batch_size  # 완전히 끝난 배치 수
+        loaded = done_batches * batch_size
+        all_feats = [saved[:loaded]]
+        feat_dim = saved.shape[1]
+        print(f'체크포인트 복원: {loaded}/{total}개 완료, {done_batches}배치 스킵')
+
+    start_batch = done_batches
+    for bi in tqdm(range(start_batch, (total + batch_size - 1) // batch_size),
+                   desc='BioMedCLIP 피처 추출',
+                   initial=start_batch,
+                   total=(total + batch_size - 1) // batch_size):
+        i = bi * batch_size
         batch = images[i:i + batch_size]
         tensors = torch.stack([preprocess(img) for img in batch]).to(device)
         feats = model.encode_image(tensors)
         feats = feats / feats.norm(dim=-1, keepdim=True)
         all_feats.append(feats.cpu().float().numpy())
+
+        if checkpoint_path:
+            np.save(checkpoint_path, np.concatenate(all_feats, axis=0))
+
     return np.concatenate(all_feats, axis=0)
 
 
@@ -89,18 +116,30 @@ def build_pathvqa_test_json(text_features_path, filter_cap_path,
     ds = load_dataset('flaviagiammarino/path-vqa', split='test')
     print(f'PathVQA test set: {len(ds)}개')
 
-    # 2. BioMedCLIP으로 이미지 피처 추출
-    model, preprocess, device = load_biomedclip()
-    images = [row['image'].convert('RGB') for row in tqdm(ds, desc='이미지 로드')]
-    img_feats = extract_image_features(model, preprocess, images, device)
-    print(f'이미지 피처 shape: {img_feats.shape}')
+    # 2. BioMedCLIP으로 이미지 피처 추출 (배치마다 체크포인트 저장)
+    out_dir = Path(output_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    feat_ckpt = out_dir / 'pathvqa_img_feats_ckpt.npy'   # 배치 단위 체크포인트
+    feat_save = out_dir / 'pathvqa_image_features.pkl'    # 최종 완성본
 
-    # (선택) 피처 저장 — 재실행 시 재사용 가능
-    feat_save = Path(output_path).parent / 'pathvqa_image_features.pkl'
-    feat_save.parent.mkdir(parents=True, exist_ok=True)
-    with open(feat_save, 'wb') as f:
-        pickle.dump({'features': img_feats, 'indices': list(range(len(ds)))}, f)
-    print(f'이미지 피처 저장: {feat_save}')
+    if feat_save.exists():
+        print(f'이미지 피처 캐시 발견, 로드: {feat_save}')
+        with open(feat_save, 'rb') as f:
+            img_feats = pickle.load(f)['features']
+        print(f'이미지 피처 shape: {img_feats.shape}')
+    else:
+        model, preprocess, device = load_biomedclip()
+        images = [row['image'].convert('RGB') for row in tqdm(ds, desc='이미지 로드')]
+        img_feats = extract_image_features(
+            model, preprocess, images, device,
+            checkpoint_path=str(feat_ckpt),
+        )
+        print(f'이미지 피처 shape: {img_feats.shape}')
+        with open(feat_save, 'wb') as f:
+            pickle.dump({'features': img_feats, 'indices': list(range(len(ds)))}, f)
+        print(f'이미지 피처 저장: {feat_save}')
+        if feat_ckpt.exists():
+            feat_ckpt.unlink()  # 완료 후 임시 체크포인트 삭제
 
     # 3. PEIR 텍스트 피처 로드
     text_features, text_keys = load_text_features(text_features_path)
