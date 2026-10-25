@@ -47,19 +47,27 @@ DATASET_MAP = {
 }
 
 
-def _normalize(s: str) -> str:
-    return s.lower().strip().rstrip('.')
+import re as _re
+
+
+def _tokenize(text: str) -> list:
+    return _re.findall(r'[a-z0-9]+', str(text).lower())
+
+
+def _score_answer(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> float:
+    gt = str(gt_answer).strip().lower()
+    pred_tokens = _tokenize(prediction)
+    if gt in ('yes', 'no') or (answer_type or '').upper() == 'CLOSED':
+        pred_label = next((t for t in pred_tokens if t in ('yes', 'no')), None)
+        return float(pred_label == gt)
+    gt_tokens = _tokenize(gt)
+    if not gt_tokens:
+        return 0.0
+    return sum(t in pred_tokens for t in gt_tokens) / len(gt_tokens)
 
 
 def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> bool:
-    pred = _normalize(prediction)
-    gt = _normalize(gt_answer)
-    if pred == gt:
-        return True
-    if answer_type == 'CLOSED' or gt in ('yes', 'no'):
-        return pred.split()[0].rstrip(',.!?;:') == gt if pred else False
-    # Open: GT가 prediction 안에 포함되면 정답 (VQA-RAD verbose 답변 대응)
-    return gt in pred
+    return _score_answer(prediction, gt_answer, answer_type) == 1.0
 
 
 def select_top_k(baseline_results: list, top_k_pct: float) -> set:
@@ -142,7 +150,9 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
             token_preds.append(processor.decode(token_id))
 
         pe = compute_predictive_entropy(generated_outputs.scores)
-        correct = _is_correct(prediction, gt_answer, example.get('answer_type', 'OPEN'))
+        answer_type = example.get('answer_type', 'OPEN')
+        score = _score_answer(prediction, gt_answer, answer_type)
+        correct = (score == 1.0)
         print(f'[{i}] Q: {question}  GT: {gt_answer}  Pred: {prediction}  {"✓" if correct else "✗"}')
 
         results.append({
@@ -150,8 +160,9 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
             'img_id': example.get('image_id', i),
             'question': question,
             'answer': gt_answer,
-            'answer_type': example.get('answer_type', 'OPEN'),
+            'answer_type': answer_type,
             'prediction': prediction,
+            'score': round(score, 4),
             'correct': correct,
             'predictive_entropy': round(pe, 6),
             'token_probs': token_probs,
@@ -240,10 +251,12 @@ def main():
     for i, base_r in enumerate(baseline_results):
         merged.append(new_by_idx[i] if i in new_by_idx else base_r)
 
-    # Summary
-    correct_count = sum(r['correct'] for r in merged)
+    # Summary — same metric as teammate: mean score per split
     closed = [r for r in merged if r.get('answer_type', '').upper() == 'CLOSED']
     open_q = [r for r in merged if r.get('answer_type', '').upper() == 'OPEN']
+    c_acc = sum(r.get('score', float(r['correct'])) for r in closed) / len(closed) if closed else 0.0
+    o_acc = sum(r.get('score', float(r['correct'])) for r in open_q) / len(open_q) if open_q else 0.0
+    ov_acc = sum(r.get('score', float(r['correct'])) for r in merged) / len(merged) if merged else 0.0
 
     output = {
         'meta': {
@@ -262,34 +275,20 @@ def main():
         },
         'summary': {
             'total': len(merged),
-            'correct': correct_count,
-            'accuracy': round(correct_count / len(merged), 4) if merged else 0.0,
+            'overall_score': round(ov_acc, 4),
+            'closed_total': len(closed),
+            'closed_score': round(c_acc, 4),
+            'open_total': len(open_q),
+            'open_score': round(o_acc, 4),
         },
         'results': merged,
     }
-    if closed:
-        c_correct = sum(r['correct'] for r in closed)
-        output['summary'].update({
-            'closed_total': len(closed),
-            'closed_correct': c_correct,
-            'closed_accuracy': round(c_correct / len(closed), 4),
-        })
-    if open_q:
-        o_correct = sum(r['correct'] for r in open_q)
-        output['summary'].update({
-            'open_total': len(open_q),
-            'open_correct': o_correct,
-            'open_accuracy': round(o_correct / len(open_q), 4),
-        })
 
     with open(args.save_path, 'w') as f:
         json.dump(output, f, indent=2)
 
-    print(f'\nMerged Accuracy: {correct_count}/{len(merged)} = {output["summary"]["accuracy"]*100:.2f}%')
-    if closed:
-        print(f'  Closed: {output["summary"]["closed_accuracy"]*100:.2f}%  (n={len(closed)})')
-    if open_q:
-        print(f'  Open  : {output["summary"]["open_accuracy"]*100:.2f}%  (n={len(open_q)})')
+    print(f'\nClosed: {c_acc*100:.2f}%  Open: {o_acc*100:.2f}%  Overall: {ov_acc*100:.2f}%')
+    print(f'Saved → {args.save_path}')
     print(f'Saved → {args.save_path}')
 
 

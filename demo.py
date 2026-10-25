@@ -116,20 +116,33 @@ def create_model(model_name_or_path, use_flash_attention=False, use_qlora=False,
     return model
 
 
-def _normalize_answer(ans: str) -> str:
-    return ans.lower().strip().rstrip('.')
+import re as _re
+
+
+def _tokenize(text: str) -> list:
+    return _re.findall(r'[a-z0-9]+', str(text).lower())
+
+
+def _score_answer(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> float:
+    """Return score in [0, 1].
+    CLOSED (yes/no): 1.0 if any token in prediction matches GT, else 0.0.
+    OPEN: token recall = |GT tokens found in pred| / |GT tokens|.
+    """
+    gt = str(gt_answer).strip().lower()
+    pred_tokens = _tokenize(prediction)
+
+    if gt in ('yes', 'no') or (answer_type or '').upper() == 'CLOSED':
+        pred_label = next((t for t in pred_tokens if t in ('yes', 'no')), None)
+        return float(pred_label == gt)
+
+    gt_tokens = _tokenize(gt)
+    if not gt_tokens:
+        return 0.0
+    return sum(t in pred_tokens for t in gt_tokens) / len(gt_tokens)
 
 
 def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> bool:
-    pred = _normalize_answer(prediction)
-    gt = _normalize_answer(gt_answer)
-    if pred == gt:
-        return True
-    # Closed (yes/no): match on first word of prediction
-    if answer_type == 'CLOSED' or gt in ('yes', 'no'):
-        return pred.split()[0].rstrip(',.!?;:') == gt if pred else False
-    # Open: GT가 prediction 안에 포함되면 정답 (VQA-RAD verbose 답변 대응)
-    return gt in pred
+    return _score_answer(prediction, gt_answer, answer_type) == 1.0
 
 
 @torch.no_grad()
@@ -214,7 +227,9 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         # Predictive Entropy (Eq. 4) — length-normalised uncertainty measure
         pe = compute_predictive_entropy(generated_outputs.scores)
 
-        correct = _is_correct(prediction, gt_answer, example.get('answer_type', 'OPEN'))
+        answer_type = example.get('answer_type', 'OPEN')
+        score = _score_answer(prediction, gt_answer, answer_type)
+        correct = (score == 1.0)
 
         print(f'Q: {question}  GT: {gt_answer}  Pred: {prediction}  PE: {pe:.3f}  {"✓" if correct else "✗"}')
 
@@ -222,8 +237,9 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             'img_id': example.get('image_id', i),
             'question': question,
             'answer': gt_answer,
-            'answer_type': example.get('answer_type', 'OPEN'),  # CLOSED | OPEN
+            'answer_type': answer_type,  # CLOSED | OPEN
             'prediction': prediction,
+            'score': round(score, 4),
             'correct': correct,
             'predictive_entropy': round(pe, 6),
             'token_probs': token_probs,
@@ -231,28 +247,25 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         })
 
     if rank == 0 and save_path:
-        # Wrap results with run metadata for cross-team comparison
-        correct_count = sum(r['correct'] for r in results)
         closed = [r for r in results if r.get('answer_type', '').upper() == 'CLOSED']
         open_q = [r for r in results if r.get('answer_type', '').upper() == 'OPEN']
+        # Closed: binary accuracy; Open: mean token recall (same as teammate)
+        c_acc = (sum(r['score'] for r in closed) / len(closed)) if closed else 0.0
+        o_acc = (sum(r['score'] for r in open_q) / len(open_q)) if open_q else 0.0
+        ov_acc = (sum(r['score'] for r in results) / len(results)) if results else 0.0
         summary = {
             'total': len(results),
-            'correct': correct_count,
-            'accuracy': round(correct_count / len(results), 4) if results else 0.0,
+            'overall_score': round(ov_acc, 4),
         }
         if closed:
-            c_correct = sum(r['correct'] for r in closed)
             summary.update({
                 'closed_total': len(closed),
-                'closed_correct': c_correct,
-                'closed_accuracy': round(c_correct / len(closed), 4),
+                'closed_score': round(c_acc, 4),
             })
         if open_q:
-            o_correct = sum(r['correct'] for r in open_q)
             summary.update({
                 'open_total': len(open_q),
-                'open_correct': o_correct,
-                'open_accuracy': round(o_correct / len(open_q), 4),
+                'open_score': round(o_acc, 4),
             })
         output = {
             'meta': {
@@ -273,7 +286,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         }
         with open(save_path, 'w') as f:
             json.dump(output, f, indent=2)
-        print(f'\nAccuracy: {correct_count}/{len(results)} = {output["summary"]["accuracy"]:.4f}')
+        print(f'\nClosed: {c_acc*100:.2f}%  Open: {o_acc*100:.2f}%  Overall: {ov_acc*100:.2f}%')
         print(f'Saved → {save_path}')
 
 
