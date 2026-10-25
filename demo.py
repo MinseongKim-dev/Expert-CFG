@@ -179,11 +179,18 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
         del inputs['highlight_attention_mask']
 
         # CFG batch: [conditional, unconditional] (Eq. 8)
-        # Use expand (no copy) since both branches share identical inputs
-        cfg_batched_input = inputs['input_ids'].expand(2, -1)
-        pixel_values = inputs['pixel_values'].expand(2, *inputs['pixel_values'].shape[1:])
-        image_sizes = inputs['image_sizes'].expand(2, *inputs['image_sizes'].shape[1:])
-        attention_mask = inputs['attention_mask'].expand(2, -1)
+        # cfg=1.0이면 single pass (2x 낭비 없음)
+        use_cfg = args.cfg != 1.0
+        if use_cfg:
+            cfg_batched_input = inputs['input_ids'].expand(2, -1)
+            pixel_values = inputs['pixel_values'].expand(2, *inputs['pixel_values'].shape[1:])
+            image_sizes = inputs['image_sizes'].expand(2, *inputs['image_sizes'].shape[1:])
+            attention_mask = inputs['attention_mask'].expand(2, -1)
+        else:
+            cfg_batched_input = inputs['input_ids']
+            pixel_values = inputs['pixel_values']
+            image_sizes = inputs['image_sizes']
+            attention_mask = inputs['attention_mask']
 
         # Register highlight mask for the attention patch (cleared after generate)
         if args.use_attn_patch:
@@ -198,7 +205,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
                 eos_token_id=processor.tokenizer.eos_token_id,
                 max_new_tokens=64,
                 num_beams=args.num_beams,
-                logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
+                logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)] if use_cfg else [],
                 output_scores=True,
                 return_dict_in_generate=True,
             )
