@@ -22,6 +22,7 @@ import argparse
 import datetime
 import json
 import os
+import threading
 
 import torch
 from tqdm import tqdm
@@ -81,13 +82,45 @@ def select_top_k(baseline_results: list, top_k_pct: float) -> set:
     return set(ranked[:k])
 
 
+def _generate_with_timeout(model, generate_kwargs, timeout_sec=120):
+    result = [None]
+    exc = [None]
+
+    def _run():
+        try:
+            result[0] = model.generate(**generate_kwargs)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+    if t.is_alive():
+        return None, TimeoutError(f'generate() hung for >{timeout_sec}s')
+    if exc[0] is not None:
+        return None, exc[0]
+    return result[0], None
+
+
 @torch.no_grad()
 def rerun_selected(model, processor, eval_dataset, selected_indices, args):
     device = f'cuda:{int(os.environ.get("LOCAL_RANK", 0))}' if torch.cuda.is_available() else 'cpu'
     model.eval()
-    results = []
 
-    for i in tqdm(sorted(selected_indices), desc=f'Selective rerun (top {args.top_k_pct}%)'):
+    # ── 체크포인트 이어받기 ────────────────────────────────────────────────────
+    ckpt_path = args.save_path.replace('.json', '_ckpt.json')
+    results = []
+    done_indices = set()
+    if os.path.exists(ckpt_path):
+        with open(ckpt_path) as _f:
+            results = json.load(_f).get('rerun_results', [])
+        done_indices = {r['dataset_index'] for r in results}
+        print(f'[resume] 체크포인트 복원: {len(done_indices)}개 완료')
+
+    remaining = sorted(set(selected_indices) - done_indices)
+
+    for i in tqdm(remaining, desc=f'Selective rerun (top {args.top_k_pct}%)',
+                  initial=len(done_indices), total=len(selected_indices)):
         example = eval_dataset[i]
         image = example['image']
         question = example['question']
@@ -118,8 +151,15 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
         if args.use_attn_patch:
             set_highlight_mask(binary_hl_mask)
 
+        use_cfg = args.cfg != 1.0
+        if not use_cfg:
+            cfg_batched_input = inputs['input_ids']
+            pixel_values = inputs['pixel_values']
+            image_sizes = inputs['image_sizes']
+            attention_mask = inputs['attention_mask']
+
         try:
-            generated_outputs = model.generate(
+            generate_kwargs = dict(
                 input_ids=cfg_batched_input,
                 pixel_values=pixel_values,
                 attention_mask=attention_mask,
@@ -127,13 +167,36 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
                 eos_token_id=processor.tokenizer.eos_token_id,
                 max_new_tokens=64,
                 num_beams=1,
-                logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)],
+                logits_processor=[ProbCFGLogitsProcessor(guidance_scale=args.cfg, use_log=True)] if use_cfg else [],
                 output_scores=True,
                 return_dict_in_generate=True,
             )
+            generated_outputs, err = _generate_with_timeout(model, generate_kwargs, timeout_sec=120)
         finally:
             if args.use_attn_patch:
                 clear_highlight_mask()
+
+        answer_type = example.get('answer_type', 'OPEN')
+
+        if generated_outputs is None:
+            print(f'[skip] sample {i} — {err}')
+            results.append({
+                'dataset_index': i,
+                'img_id': example.get('image_id', i),
+                'question': question,
+                'answer': gt_answer,
+                'answer_type': answer_type,
+                'prediction': '',
+                'score': 0.0,
+                'correct': False,
+                'predictive_entropy': 0.0,
+                'token_probs': [],
+                'token_preds': [],
+                'skipped': True,
+            })
+            with open(ckpt_path, 'w') as _f:
+                json.dump({'rerun_results': results}, _f)
+            continue
 
         prompt_len = inputs['input_ids'].size(1)
         prediction = processor.batch_decode(
@@ -150,7 +213,6 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
             token_preds.append(processor.decode(token_id))
 
         pe = compute_predictive_entropy(generated_outputs.scores)
-        answer_type = example.get('answer_type', 'OPEN')
         score = _score_answer(prediction, gt_answer, answer_type)
         correct = (score == 1.0)
         print(f'[{i}] Q: {question}  GT: {gt_answer}  Pred: {prediction}  {"✓" if correct else "✗"}')
@@ -168,6 +230,10 @@ def rerun_selected(model, processor, eval_dataset, selected_indices, args):
             'token_probs': token_probs,
             'token_preds': token_preds,
         })
+
+        # 매 샘플마다 체크포인트 저장
+        with open(ckpt_path, 'w') as _f:
+            json.dump({'rerun_results': results}, _f)
 
     return results
 
@@ -289,7 +355,9 @@ def main():
 
     print(f'\nClosed: {c_acc*100:.2f}%  Open: {o_acc*100:.2f}%  Overall: {ov_acc*100:.2f}%')
     print(f'Saved → {args.save_path}')
-    print(f'Saved → {args.save_path}')
+    # 완료 시 체크포인트 삭제
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
 
 
 if __name__ == '__main__':
