@@ -158,6 +158,22 @@ def build_pathvqa_test_json(text_features_path, filter_cap_path,
         match_keyword = json.load(f)
     print(f'match_keyword: {len(match_keyword)}개')
 
+    # match_id 역인덱스: text_features.h5 키 = match_id → img_ids/keywords
+    mid_to_img_ids: dict = {}
+    mid_to_keywords: dict = {}
+    for info in match_keyword.values():
+        mid = info.get('match_id')
+        if mid is None:
+            continue
+        mid_key = str(mid)
+        if mid_key not in mid_to_img_ids:
+            mid_to_img_ids[mid_key] = info.get('img_ids', [])
+            mid_to_keywords[mid_key] = info.get('match_keyword', [])
+        else:
+            mid_to_img_ids[mid_key].extend(info.get('img_ids', []))
+            mid_to_keywords[mid_key].extend(info.get('match_keyword', []))
+    print(f'역인덱스 구성: {len(mid_to_img_ids)}개 match_id')
+
     # 5. 각 샘플에 top_k 캡션 + highlights 계산
     annotations = []
     for i, row in enumerate(tqdm(ds, desc='RAG 계산')):
@@ -167,14 +183,16 @@ def build_pathvqa_test_json(text_features_path, filter_cap_path,
 
         top_captions, all_highlights = [], []
         for idx in top_k_idx:
-            peir_key = text_keys[idx]
-            cap = filter_cap.get(str(peir_key), '')
-            if cap:
-                top_captions.append(cap)
-            for info in match_keyword.values():
-                if str(peir_key) in [str(x) for x in info.get('img_ids', [])]:
-                    all_highlights.extend(info.get('match_keyword', []))
+            mid_key = str(text_keys[idx])  # match_id
+
+            img_ids = mid_to_img_ids.get(mid_key, [])
+            for img_id in img_ids:
+                cap = filter_cap.get(str(img_id), '')
+                if cap:
+                    top_captions.append(cap)
                     break
+
+            all_highlights.extend(mid_to_keywords.get(mid_key, []))
 
         if not top_captions:
             top_captions = ['']

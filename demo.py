@@ -379,7 +379,7 @@ def main():
     parser.add_argument('--input_json', type=str, help='Question and Answer json path')
     parser.add_argument('--img_root', type=str, help='Image Folder')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
-    parser.add_argument('--num_crops', type=int, default=16, help='Number of maximum image crops')
+    parser.add_argument('--num_crops', type=int, default=4, help='Number of maximum image crops')
     parser.add_argument('--no-tqdm', dest='tqdm', action='store_false', help='Disable tqdm')
     parser.add_argument('--lora_rank', type=int, default=64, help='LoRA rank')
     parser.add_argument(

@@ -90,14 +90,34 @@ def build_test_json(features_dir, text_features_path, filter_cap_path,
 
     print(f"filter_cap 캡션: {len(filter_cap)}개")
 
-    # 4. match_keyword 로드 → {caption_text: {keywords, match_keyword}}
+    # 4. match_keyword 로드 + 역인덱스 구성
+    # match_keyword.json: {any_key: {match_id: int, img_ids: [...], match_keyword: [...]}}
+    # text_features.h5 키 = match_id (0~16554)
+    # filter_cap.json 키 = PEIR image_id (img_ids로 참조)
     with open(match_keyword_path) as f:
         match_keyword = json.load(f)
     print(f"match_keyword: {len(match_keyword)}개")
 
+    # match_id → {img_ids, keywords} 역인덱스 (O(1) 조회용)
+    mid_to_img_ids: dict = {}
+    mid_to_keywords: dict = {}
+    for info in match_keyword.values():
+        mid = info.get("match_id")
+        if mid is None:
+            continue
+        mid_key = str(mid)
+        if mid_key not in mid_to_img_ids:
+            mid_to_img_ids[mid_key] = info.get("img_ids", [])
+            mid_to_keywords[mid_key] = info.get("match_keyword", [])
+        else:
+            # 같은 match_id에 여러 항목이면 병합
+            mid_to_img_ids[mid_key].extend(info.get("img_ids", []))
+            mid_to_keywords[mid_key].extend(info.get("match_keyword", []))
+    print(f"역인덱스 구성 완료: {len(mid_to_img_ids)}개 match_id")
+
     # 5. 텍스트 피처를 matrix로 변환
     text_feat_matrix = np.stack(list(text_features.values()), axis=0).astype(np.float32)
-    text_feat_keys = list(text_features.keys())
+    text_feat_keys = list(text_features.keys())  # 각 키 = match_id (str)
 
     # 6. VQA-RAD 데이터 로드 (HuggingFace)
     try:
@@ -142,17 +162,18 @@ def build_test_json(features_dir, text_features_path, filter_cap_path,
         all_highlights = []
 
         for idx in top_k_idx:
-            peir_key = text_feat_keys[idx]
-            cap = filter_cap.get(str(peir_key), "")
-            if cap:
-                top_captions.append(cap)
+            mid_key = str(text_feat_keys[idx])  # match_id (str)
 
-            # highlights: match_keyword에서 키워드 찾기
-            for caption_text, info in match_keyword.items():
-                if str(peir_key) in [str(x) for x in info.get("img_ids", [])]:
-                    kws = info.get("match_keyword", [])
-                    all_highlights.extend(kws)
-                    break
+            # 역인덱스로 O(1) 조회: match_id → img_ids → caption
+            img_ids = mid_to_img_ids.get(mid_key, [])
+            for img_id in img_ids:
+                cap = filter_cap.get(str(img_id), "")
+                if cap:
+                    top_captions.append(cap)
+                    break  # 첫 번째 유효 캡션만 사용
+
+            # highlights: match_id → keywords (O(1))
+            all_highlights.extend(mid_to_keywords.get(mid_key, []))
 
         if not top_captions:
             top_captions = [""]
