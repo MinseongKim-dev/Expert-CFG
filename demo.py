@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import threading
 import torch
 from accelerate import Accelerator
 from accelerate import DataLoaderConfiguration
@@ -146,14 +147,45 @@ def _is_correct(prediction: str, gt_answer: str, answer_type: str = 'OPEN') -> b
 
 
 @torch.no_grad()
+def _generate_with_timeout(model, generate_kwargs, timeout_sec=120):
+    """model.generate()를 별도 스레드에서 실행, timeout_sec 초 초과 시 None 반환."""
+    result = [None]
+    exc = [None]
+
+    def _run():
+        try:
+            result[0] = model.generate(**generate_kwargs)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+    if t.is_alive():
+        return None, TimeoutError(f'generate() hung for >{timeout_sec}s')
+    if exc[0] is not None:
+        return None, exc[0]
+    return result[0], None
+
+
 def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=False):
     rank = int(os.environ.get('RANK', 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
     model.eval()
-    results = []
 
-    for i in tqdm(range(len(eval_dataset)), disable=(rank != 0) or disable_tqdm):
+    # ── 체크포인트 이어받기 ────────────────────────────────────────────────────
+    ckpt_path = save_path.replace('.json', '_ckpt.json') if save_path else None
+    results = []
+    start_i = 0
+    if ckpt_path and os.path.exists(ckpt_path):
+        with open(ckpt_path) as _f:
+            results = json.load(_f).get('results', [])
+        start_i = len(results)
+        print(f'[resume] 체크포인트 복원: {start_i}/{len(eval_dataset)}개 완료, 이어서 실행')
+
+    for i in tqdm(range(start_i, len(eval_dataset)), initial=start_i,
+                  total=len(eval_dataset), disable=(rank != 0) or disable_tqdm):
         # Phi-3-V currently only supports batch_size == 1
         example = eval_dataset[i]
         image = example['image']
@@ -197,7 +229,7 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             set_highlight_mask(binary_hl_mask)
 
         try:
-            generated_outputs = model.generate(
+            generate_kwargs = dict(
                 input_ids=cfg_batched_input,
                 pixel_values=pixel_values,
                 attention_mask=attention_mask,
@@ -209,9 +241,30 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
                 output_scores=True,
                 return_dict_in_generate=True,
             )
+            generated_outputs, err = _generate_with_timeout(model, generate_kwargs, timeout_sec=120)
         finally:
             if args.use_attn_patch:
                 clear_highlight_mask()
+
+        if generated_outputs is None:
+            print(f'[skip] sample {i} — {err}')
+            results.append({
+                'img_id': example.get('image_id', i),
+                'question': question,
+                'answer': gt_answer,
+                'answer_type': example.get('answer_type', 'OPEN'),
+                'prediction': '',
+                'score': 0.0,
+                'correct': False,
+                'predictive_entropy': 0.0,
+                'token_probs': [],
+                'token_preds': [],
+                'skipped': True,
+            })
+            if rank == 0 and ckpt_path:
+                with open(ckpt_path, 'w') as _f:
+                    json.dump({'results': results}, _f)
+            continue
 
         prompt_len = inputs['input_ids'].size(1)
 
@@ -253,12 +306,15 @@ def evaluate(model, processor, eval_dataset, args, save_path=None, disable_tqdm=
             'token_preds': token_preds,
         })
 
-        # 500개마다 중간 저장
-        if rank == 0 and save_path and (i + 1) % 500 == 0:
-            ckpt_path = save_path.replace('.json', f'_ckpt{i+1}.json')
+        # 매 샘플마다 체크포인트 저장 (재실행 시 이어받기용)
+        if rank == 0 and ckpt_path:
             with open(ckpt_path, 'w') as _f:
                 json.dump({'results': results}, _f)
-            print(f'[ckpt] {i+1}개 저장 → {ckpt_path}')
+        # 100개마다 진행상황 출력
+        if rank == 0 and (i + 1) % 100 == 0:
+            done = len(results)
+            total = len(eval_dataset)
+            print(f'[progress] {done}/{total} ({done/total*100:.1f}%)')
 
     if rank == 0 and save_path:
         closed = [r for r in results if r.get('answer_type', '').upper() == 'CLOSED']
