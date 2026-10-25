@@ -1,0 +1,187 @@
+"""
+PathVQA test.json 생성 스크립트 (top_k_captions, highlights 포함)
+
+BioMedCLIP으로 PathVQA 이미지 피처를 추출하고,
+VQA-RAD와 동일한 PEIR 데이터베이스로 top_k 캡션 + highlights를 계산합니다.
+
+필요한 파일 (VQA-RAD용과 동일):
+  - data/RadVQA/text_features.h5        (PEIR 텍스트 피처)
+  - data/filter_cap.json                (PEIR GPT3.5 캡션)
+  - data/PEIR_openai_match_keyword.json (highlights용)
+
+Usage (Colab/Kaggle):
+  python scripts/build_pathvqa_test_json.py \
+      --text_features /kaggle/input/expert-cfg-data/text_features.h5 \
+      --filter_cap /kaggle/input/expert-cfg-data/filter_cap.json \
+      --match_keyword /kaggle/input/expert-cfg-data/PEIR_openai_match_keyword.json \
+      --output data/PathVQA/test.json \
+      --top_k 5
+"""
+
+import argparse
+import json
+import os
+import pickle
+import numpy as np
+import h5py
+import torch
+from pathlib import Path
+from tqdm import tqdm
+from PIL import Image
+
+
+# ── BioMedCLIP 로드 ──────────────────────────────────────────────────────────
+
+def load_biomedclip():
+    try:
+        import open_clip
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+        )
+        model.eval()
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = model.to(device)
+        print(f'BioMedCLIP 로드 완료 (device={device})')
+        return model, preprocess, device
+    except Exception as e:
+        raise RuntimeError(f'BioMedCLIP 로드 실패: {e}\n  pip install open_clip_torch')
+
+
+@torch.no_grad()
+def extract_image_features(model, preprocess, images, device, batch_size=64):
+    """PIL Image 리스트 → numpy feature matrix (N, D)"""
+    all_feats = []
+    for i in tqdm(range(0, len(images), batch_size), desc='BioMedCLIP 피처 추출'):
+        batch = images[i:i + batch_size]
+        tensors = torch.stack([preprocess(img) for img in batch]).to(device)
+        feats = model.encode_image(tensors)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        all_feats.append(feats.cpu().float().numpy())
+    return np.concatenate(all_feats, axis=0)
+
+
+# ── PEIR 데이터 로드 ─────────────────────────────────────────────────────────
+
+def load_text_features(h5_path):
+    features, keys = {}, []
+    with h5py.File(h5_path, 'r') as f:
+        for key in f.keys():
+            features[key] = f[key][()]
+            keys.append(key)
+    print(f'텍스트 피처 로드: {len(features)}개')
+    return features, keys
+
+
+def cosine_similarity_batch(query, matrix):
+    query = query / (np.linalg.norm(query) + 1e-8)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8
+    return (matrix / norms) @ query
+
+
+# ── 메인 ─────────────────────────────────────────────────────────────────────
+
+def build_pathvqa_test_json(text_features_path, filter_cap_path,
+                             match_keyword_path, output_path, top_k=5):
+
+    # 1. PathVQA 로드
+    from datasets import load_dataset
+    print('PathVQA 로드 중...')
+    ds = load_dataset('flaviagiammarino/path-vqa', split='test')
+    print(f'PathVQA test set: {len(ds)}개')
+
+    # 2. BioMedCLIP으로 이미지 피처 추출
+    model, preprocess, device = load_biomedclip()
+    images = [row['image'].convert('RGB') for row in tqdm(ds, desc='이미지 로드')]
+    img_feats = extract_image_features(model, preprocess, images, device)
+    print(f'이미지 피처 shape: {img_feats.shape}')
+
+    # (선택) 피처 저장 — 재실행 시 재사용 가능
+    feat_save = Path(output_path).parent / 'pathvqa_image_features.pkl'
+    feat_save.parent.mkdir(parents=True, exist_ok=True)
+    with open(feat_save, 'wb') as f:
+        pickle.dump({'features': img_feats, 'indices': list(range(len(ds)))}, f)
+    print(f'이미지 피처 저장: {feat_save}')
+
+    # 3. PEIR 텍스트 피처 로드
+    text_features, text_keys = load_text_features(text_features_path)
+    text_feat_matrix = np.stack(list(text_features.values()), axis=0).astype(np.float32)
+
+    # 4. filter_cap / match_keyword 로드
+    with open(filter_cap_path) as f:
+        raw = json.load(f)
+    if 'annotations' in raw:
+        filter_cap = {str(a['image_id']): a['caption'] for a in raw['annotations']}
+    else:
+        filter_cap = {str(k): v for k, v in raw.items()}
+    print(f'filter_cap: {len(filter_cap)}개')
+
+    with open(match_keyword_path) as f:
+        match_keyword = json.load(f)
+    print(f'match_keyword: {len(match_keyword)}개')
+
+    # 5. 각 샘플에 top_k 캡션 + highlights 계산
+    annotations = []
+    for i, row in enumerate(tqdm(ds, desc='RAG 계산')):
+        img_feat = img_feats[i]
+        sims = cosine_similarity_batch(img_feat, text_feat_matrix)
+        top_k_idx = np.argsort(sims)[::-1][:top_k]
+
+        top_captions, all_highlights = [], []
+        for idx in top_k_idx:
+            peir_key = text_keys[idx]
+            cap = filter_cap.get(str(peir_key), '')
+            if cap:
+                top_captions.append(cap)
+            for info in match_keyword.values():
+                if str(peir_key) in [str(x) for x in info.get('img_ids', [])]:
+                    all_highlights.extend(info.get('match_keyword', []))
+                    break
+
+        if not top_captions:
+            top_captions = ['']
+        all_highlights = list(dict.fromkeys(all_highlights))
+
+        # PathVQA answer_type: yes/no면 CLOSED, 나머지 OPEN
+        answer = str(row['answer']).strip().lower()
+        answer_type = 'CLOSED' if answer in ('yes', 'no') else 'OPEN'
+
+        annotations.append({
+            'img_id': f'test_{i:05d}',
+            'question': row['question'],
+            'answer': row['answer'],
+            'answer_type': answer_type,
+            'top_k_captions': top_captions,
+            'highlights': all_highlights,
+        })
+
+    # 6. 저장
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(annotations, f, indent=2, ensure_ascii=False)
+    print(f'\n저장 완료: {output_path}  ({len(annotations)}개)')
+
+    # 통계
+    closed = sum(1 for a in annotations if a['answer_type'] == 'CLOSED')
+    opened = len(annotations) - closed
+    empty_hl = sum(1 for a in annotations if not a['highlights'])
+    print(f'  CLOSED={closed}  OPEN={opened}')
+    print(f'  highlights 비어있는 샘플: {empty_hl}')
+    print(f'  샘플 예시: {annotations[0]}')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--text_features', required=True)
+    parser.add_argument('--filter_cap', required=True)
+    parser.add_argument('--match_keyword', required=True)
+    parser.add_argument('--output', default='data/PathVQA/test.json')
+    parser.add_argument('--top_k', type=int, default=5)
+    args = parser.parse_args()
+
+    build_pathvqa_test_json(
+        args.text_features,
+        args.filter_cap,
+        args.match_keyword,
+        args.output,
+        args.top_k,
+    )
