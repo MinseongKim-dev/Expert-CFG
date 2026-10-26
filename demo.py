@@ -470,6 +470,7 @@ def main():
         )
         if args.output_dir:
             model.load_adapter(args.output_dir)
+            print(f'[LoRA] Loaded adapter: {args.output_dir}')
 
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     model = model.to(f'cuda:{local_rank}')
