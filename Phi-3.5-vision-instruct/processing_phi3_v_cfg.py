@@ -36,16 +36,35 @@ from typing import List, Optional, Union
 import numpy as np
 
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
-from transformers.image_transforms import (
-    convert_to_rgb,
-)
-from transformers.image_utils import (
-    OPENAI_CLIP_MEAN,
-    OPENAI_CLIP_STD,
-    ImageInput,
-    make_list_of_images,
-    valid_images,
-)
+try:
+    from transformers.image_transforms import convert_to_rgb
+except ImportError:
+    try:
+        from transformers.image_utils import convert_to_rgb
+    except ImportError:
+        def convert_to_rgb(image):
+            return image.convert('RGB')
+
+try:
+    from transformers.image_utils import (
+        OPENAI_CLIP_MEAN,
+        OPENAI_CLIP_STD,
+        ImageInput,
+        make_list_of_images,
+        valid_images,
+    )
+except ImportError:
+    from transformers.image_utils import (
+        OPENAI_CLIP_MEAN,
+        OPENAI_CLIP_STD,
+        ImageInput,
+        make_list_of_images,
+    )
+    try:
+        from transformers.image_utils import is_valid_image as valid_images
+    except ImportError:
+        def valid_images(images):
+            return all(hasattr(img, 'size') or hasattr(img, 'shape') for img in images)
 from transformers.utils import TensorType, is_vision_available, logging
 
 from transformers import AutoImageProcessor
@@ -84,7 +103,7 @@ def HD_transform(img, hd_num=16):
     width, height = img.size
     trans = False
     if width < height:
-        img = img.transpose(Image.TRANSPOSE)
+        img = img.transpose(getattr(Image.Transpose, 'TRANSPOSE', Image.TRANSPOSE))
         trans = True
         width, height = img.size
     ratio = (width/ height)
@@ -99,7 +118,7 @@ def HD_transform(img, hd_num=16):
     img = padding_336(img)
     width, height = img.size
     if trans:
-        img = img.transpose(Image.TRANSPOSE)
+        img = img.transpose(getattr(Image.Transpose, 'TRANSPOSE', Image.TRANSPOSE))
 
     return img
 
