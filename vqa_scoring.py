@@ -178,7 +178,10 @@ def load_records_json(path):
             for r in json.load(open(path))]
 
 
-# ───────────────────────── 보조 채점 S1+S2 (팀 공식 규칙으로 쓸 경우 모든 모델에 이 함수를 그대로 적용) ─────────────────────────
+# ───────────────────────── 참고 채점 S1+S2 (규칙 완화 · 공식 결과가 아님) ─────────────────────────
+# 지위: 공식 채점은 원본('phi')이다. S1+S2 는 Phi 의 VQA-RAD test 오답에서 도출한 규칙이라 교수님 규칙(test 는 마지막에 한 번) 기준으로
+#       규칙 완화이며, "표기 차이가 논문과의 격차에서 차지하는 몫"을 보는 참고 열로만 쓴다. 쓸 때는 모든 모델에 같은 함수를 적용한다.
+# 구성: S1 = 표기 정규화(대소문자·하이픈·단수복수·약어 3개), S2 = 일반어 3개 생략. score_s1 / score_s1s2 로 따로 잴 수 있다.
 # 기반은 'phi' 방식(open = 토큰 recall, closed = 정답 단어가 예측에 포함)이고, open 에서만 표기 차이를 허용한다. closed 는 건드리지 않는다.
 #  S1 (표기 차이): 대소문자, 하이픈·공백(x-ray = xray), 단수·복수(sinuses = sinus), 같은 용어의 약어(posterior anterior = pa, x ray = xray, diffusion weighted = dwi)
 #  S2 (일반어 생략): 단독으로는 정보를 더하지 않는 plane · weighted · mri 를 뺀 형태끼리 비교 (Axial plane = axial, T2-weighted = T2)
@@ -213,6 +216,26 @@ def _s1_recall(pred, gt, drop):
     f = (lambda L: [w for w in L if w not in S1S2_REDUNDANT] or L) if drop else (lambda L: L)
     g, p = Counter(f(_s1_tokens(gt))), Counter(f(_s1_tokens(pred)))
     return sum((g & p).values()) / sum(g.values()) if g else 0.0
+
+
+S1S2_SPEC = {
+    '지위': '참고(규칙 완화). 공식 채점은 원본(phi)',
+    '도출 출처': 'Phi-3.5V 의 VQA-RAD test 오답 70개 (test 를 보고 만든 규칙)',
+    'S1': {'정규화': '소문자, 하이픈·아포스트로피 제거 후 공백 정리, 단수·복수 통일(sinuses→sinus 등)',
+           '약어 치환': dict(S1S2_ABBR)},
+    'S2': {'생략 단어': sorted(S1S2_REDUNDANT)},
+    '불허': 'plain film↔Xray, brain↔CNS, Right lung↔Right, CT with contrast↔CT, T2-MRI↔MRI 처럼 정보를 더하거나 빼거나 다른 용어를 같게 보는 것',
+    '점수': 'open = max(원본 recall, S1 recall, S1+S2 recall) → 원본보다 낮아지지 않음. closed 는 원본 그대로',
+    '관찰': 'SLAKE 에서는 점수가 바뀌지 않음(규칙이 VQA-RAD test 오답에 맞춰짐). 표준 정규화(llava·std)만으로는 거의 안 오름',
+}
+
+
+def score_s1(rec):
+    """S1 만 (일반어 생략 없음): open = max(원본 recall, S1 recall). closed 는 원본."""
+    base = score_phi(rec)
+    if rec['answer_type'] != 'OPEN':
+        return base
+    return max(base, _s1_recall(rec['prediction'], rec['answer'], False))
 
 
 def score_s1s2(rec):

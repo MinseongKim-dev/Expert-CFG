@@ -43,6 +43,22 @@ arXiv HTML 본문에서 도구로 추출한 값이다. 베이스라인은 프로
 | | S1+S2 (참고, 규칙 완화) | 67.99 | 88.97 | 80.64 | −1.40 | |
 | SLAKE | 원본 = S1+S2 | 85.04 | 86.54 | **85.63** | +0.43 | 83.57 ~ 87.62 |
 
+### 3-1b. 채점 방식별 베이스라인 (VQA-RAD, 같은 예측)
+
+| 채점 | 지위 | open | closed | overall | 논문 대비 |
+|---|---|---|---|---|---|
+| phi (원본) | **공식** (논문과 같은 recall 계열) | 65.33 | 88.97 | **79.59** | −2.45 |
+| llava (LLaVA-Med v1.0 평가 코드 이식) | 논문 비교 후보 → 부적합 | 64.84 | 83.82 | 76.29 | −5.75 |
+| std (llava 정규화 + 단수·복수) | 사전 정의한 표준 정규화 | 65.36 | 83.82 | 76.50 | −5.54 |
+| S1+S2 | 참고, **규칙 완화** | 67.99 | 88.97 | 80.64 | −1.40 |
+
+- 논문은 "LLaVA-Med를 따라 closed는 accuracy, open은 recall"이라고만 적었고 정규화 세부는 없다. 저자 저장소에는 평가 스크립트가 없다.
+- llava 방식은 closed에서 예측에 `yes`/`no`가 있어야 정답으로 친다. VQA-RAD closed 중 정답이 yes/no가 아닌 문항(`Left`, `Female`, `MRI`, `Both` 등) 14개가 모두 0점이 되어 closed가 5.15%p 내려간다. 논문 closed(90.44)가 이 규칙으로 계산되었다면 우리 값이 더 멀어지므로, 논문이 이 코드를 그대로 쓴 것 같지는 않다(추정).
+- std의 open이 phi와 0.03%p 차이라서 일반 정규화(관사·숫자·단수복수)로는 격차가 줄지 않는다. S1+S2의 open 상승분(+2.66)은 test 오답에서 도출한 약어·일반어 규칙에서 나온 것이다.
+- llava의 open이 phi보다 0.49%p 낮은 이유는 확인하지 못했다(관사 제거는 점수를 올리는 방향).
+- **S1+S2 정의** (코드: `vqa_scoring.S1S2_SPEC`): S1 = 소문자·하이픈·아포스트로피·단수복수 통일 + 약어 3개(x ray→xray, posterior anterior→pa, diffusion weighted→dwi), S2 = `plane`·`weighted`·`mri` 생략. open 점수는 max(원본, S1, S1+S2)이고 closed는 원본이다. Phi의 VQA-RAD test 오답 70개에서 도출했으므로 규칙 완화이고, SLAKE에서는 점수가 바뀌지 않았다. 규칙 준수 방식으로 만들려면 val 예측에서 도출해 동결한 뒤 test에 한 번 적용해야 하며(`mine_generic_words`, `make_val_rule_scorer`), val 예측이 없어 아직 하지 못했다.
+- 교수님 지침에 따른 통일 채점(closed accuracy, open EM·F1, recall은 참고)은 노트북 02의 "통일 채점" 셀로 모든 행에 대해 낸다. 이 셀은 아직 Colab에서 실행하지 않았다.
+
 ### 3-2. VQA-RAD, KB = `peir` (open / closed / overall 은 S1+S2 기준 참고값, 공식은 "원본 overall"과 그 Δ)
 
 Δ원본은 원본 overall 의 차이(점추정)다. 95% 구간은 S1+S2 기준이라 참고로만 둔다.
