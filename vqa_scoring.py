@@ -347,6 +347,78 @@ def rule_overlap(drop_words):
     return {'val 도출': sorted(a), 'S1+S2': sorted(b), '겹침': sorted(a & b), 'S1+S2 에만': sorted(b - a)}
 
 
+# ───────────────────────── (4) 학습 데이터의 정답 분포에서 S1+S2 를 일반화: 'data' ─────────────────────────
+# 손으로 만든 S1+S2 의 세 요소(일반어 생략 · 약어 · 표기/복수)를 train 정답 문자열의 통계에서 자동으로 학습한다.
+# 입력은 train(필요하면 val)의 open 정답뿐이다 — 모델 예측도 test 도 쓰지 않으므로 test 를 본 규칙이 아니다.
+#   일반어: "A" 와 "A w" 가 둘 다 정답으로 존재하고(삽입쌍 ≥ min_support), w 를 다른 단어로 바꾼 정답은 없는 단어 w
+#          (axial / axial plane 은 plane 이 일반어, right lung / left lung 은 right 가 정보어라 제외)
+#   약어: 정답에 나오는 짧은 토큰 x 가 같은 정답 집합의 다단어 구의 머리글자와 같으면 구→x
+#   붙여쓰기: 인접한 두 토큰의 합이 정답 어휘에 있으면(x ray / xray) 합친다
+#   복수: w 와 w+s / w+es 가 모두 정답 어휘에 있으면 복수형→단수형
+def learn_rules(open_answers, min_support=2, max_ngram=4):
+    from collections import defaultdict
+    ans = [tuple(llava_normalize(a).split()) for a in open_answers]
+    A = {t for t in ans if t}
+    vocab = Counter(w for t in A for w in t)
+    ins, pat = Counter(), defaultdict(set)
+    for t in A:
+        for i in range(len(t)):
+            if len(t) >= 2 and t[:i] + t[i + 1:] in A:
+                ins[t[i]] += 1
+            if len(t) >= 2:
+                pat[(t[:i], t[i + 1:])].add(t[i])
+    sub = defaultdict(set)
+    for ws in pat.values():
+        if len(ws) >= 2:
+            for w in ws:
+                sub[w] |= ws - {w}
+    generic = {w: n for w, n in ins.items() if n >= min_support and not sub[w]}
+    ngrams = {t[i:i + n] for t in A for n in range(2, max_ngram + 1) for i in range(len(t) - n + 1)}
+    abbr = {}
+    stop = {'and', 'of', 'the', 'to', 'is', 'in', 'as', 'at', 'a', 'an', 'or', 'with', 'on', 'for', 'by', 'from', 'it', 'no', 'not'}
+    singles = {t[0] for t in A if len(t) == 1}              # 약어는 그 자체로 정답이 되는 짧은 토큰이어야 한다
+    for g in ngrams:
+        ini = ''.join(w[0] for w in g)
+        if 2 <= len(ini) <= 5 and ini in singles and not (set(g) & stop):
+            abbr[' '.join(g)] = ini
+    joined = {}
+    for t in A:
+        for i in range(len(t) - 1):
+            if t[i] + t[i + 1] in vocab:
+                joined[t[i] + ' ' + t[i + 1]] = t[i] + t[i + 1]
+    plural = {}
+    for w in vocab:
+        for suf in ('s', 'es'):
+            if w + suf in vocab:
+                plural[w + suf] = w
+    return {'generic_words': generic, 'abbreviations': abbr, 'joined': joined, 'plurals': plural,
+            'n_answers': len(A), 'min_support': min_support}
+
+
+def _apply_rules(text, rules, drop=False):
+    t = ' ' + llava_normalize(text) + ' '
+    for k, v in {**rules['joined'], **rules['abbreviations']}.items():
+        t = t.replace(f' {k} ', f' {v} ')
+    toks = [rules['plurals'].get(w, w) for w in t.split()]
+    if drop:
+        kept = [w for w in toks if w not in rules['generic_words']]
+        toks = kept or toks
+    return toks
+
+
+def make_data_scorer(rules):
+    """학습한(동결된) 규칙으로 만든 채점. open = max(원본 recall, 규칙 적용 recall, 규칙+일반어 생략 recall). closed 는 원본."""
+    def scorer(rec):
+        base = score_phi(rec)
+        if rec['answer_type'] != 'OPEN':
+            return base
+        best = base
+        for drop in (False, True):
+            best = max(best, _llava_recall_from_tokens(_apply_rules(rec['prediction'], rules, drop), _apply_rules(rec['answer'], rules, drop)))
+        return best
+    return scorer
+
+
 def bootstrap_ci(records, scorer=score_phi, n_boot=10000, seed=0, alpha=0.05):
     """문항을 복원추출해 open / closed / overall 의 (평균, 하한, 상한) 을 돌려준다. 표본 크기만으로 생기는 변동 범위를 본다
     (학습 시드 변동은 포함하지 않는다). 반환: {'open': (m, lo, hi), 'closed': ..., 'overall': ...} (0~100)."""
