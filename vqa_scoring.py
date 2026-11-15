@@ -223,6 +223,107 @@ def score_s1s2(rec):
     return max(base, _s1_recall(rec['prediction'], rec['answer'], False), _s1_recall(rec['prediction'], rec['answer'], True))
 
 
+# ───────────────────────── (1) 논문이 따랐다는 LLaVA-Med v1.0 평가 코드의 이식: 'llava' ─────────────────────────
+# 논문 4.3절: "LLaVA-Med 를 따라 closed 는 accuracy, open 은 recall". 출처: microsoft/LLaVA-Med v1.0.0 의
+#   llava/eval/run_eval.py (closed 규칙), eval_metrics/glossary.py::normalize_word, eval_metrics/evaluate_metrics.py::calculate_f1score (recall).
+# 우리 'phi' 채점과의 차이: ① 정규화가 다르다(관사 a/an/the 제거, 숫자 단어→숫자, 소수점·천 단위 쉼표 유지, 하이픈 등은 공백/삭제)
+#   ② closed: 예측에 'yes' 나 'no' 가 부분문자열로 있어야 하고, 정답이 정규화된 예측 문자열의 '부분문자열'이면 맞음 (단어 목록 원소가 아님)
+#   ③ open recall: 맞힌 단어 수를 '예측 쪽 중복 횟수'로 센다 (정답 단어가 예측에 여러 번 나오면 부풀 수 있음)
+# 이식하지 않은 것: contractions(dont→don't 등 약 120개 사전). 의료 답변에는 거의 나오지 않아 영향이 없다고 보지만 직접 확인하지 않았다.
+_LM_PUNCT = [';', '/', '[', ']', '"', '{', '}', '(', ')', '=', '+', '\\', '_', '-', '>', '<', '@', '`', ',', '?', '!']
+_LM_PERIOD = re.compile(r'(?!<=\d)(\.)(?!\d)')
+_LM_COMMA = re.compile(r'(\d)(\,)(\d)')
+_LM_NUM = {'none': '0', 'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+           'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10'}
+_LM_ARTICLES = {'a', 'an', 'the'}
+
+
+def llava_normalize(text):
+    token = str(text).lower()
+    _t = token
+    for p in _LM_PUNCT:
+        if (p + ' ' in token or ' ' + p in token) or (re.search(_LM_COMMA, token) is not None):
+            _t = _t.replace(p, '')
+        else:
+            _t = _t.replace(p, ' ')
+    token = _LM_PERIOD.sub('', _t)
+    words = [_LM_NUM.get(w, w) for w in token.split()]
+    return ' '.join(w for w in words if w not in _LM_ARTICLES).replace(',', '')
+
+
+def _llava_recall_from_tokens(cand, ref):
+    c, r = Counter(cand), Counter(ref)
+    if not c or not r:
+        return 0.0
+    tp = sum(c[w] for w in c if w in r)                # 원본과 같이 예측 쪽 횟수로 센다
+    fn = sum(r[w] for w in r if w not in c)
+    return tp / (tp + fn) if tp else 0.0
+
+
+def llava_closed(pred, gt):
+    p, g = llava_normalize(pred), llava_normalize(gt)
+    return float(('yes' in p or 'no' in p) and g in p)
+
+
+def llava_open_recall(pred, gt):
+    return _llava_recall_from_tokens(llava_normalize(pred).split(), llava_normalize(gt).split())
+
+
+def score_llava(rec):
+    """LLaVA-Med v1.0 평가 방식(논문이 따랐다고 적은 방식). 모든 모델에 같은 함수를 쓴다."""
+    return llava_closed(rec['prediction'], rec['answer']) if rec['answer_type'] != 'OPEN' else llava_open_recall(rec['prediction'], rec['answer'])
+
+
+# ───────────────────────── (2) 사전 정의한 표준 정규화 'std' (test 를 보지 않고 정한 일반 규칙) ─────────────────────────
+# 'llava' 에 단수·복수 통일(_s1_singular)만 더한다. 약어 사전(x ray, pa, dwi)과 일반어 생략(plane/weighted/mri)은 넣지 않는다 —
+# 그 둘은 Phi 의 VQA-RAD test 오답에서 나온 것이라 사전 정의가 아니다. closed 는 'llava' 규칙 그대로.
+def std_tokens(text):
+    return [_s1_singular(w) for w in llava_normalize(text).split()]
+
+
+def score_std(rec):
+    if rec['answer_type'] != 'OPEN':
+        return llava_closed(rec['prediction'], rec['answer'])
+    return _llava_recall_from_tokens(std_tokens(rec['prediction']), std_tokens(rec['answer']))
+
+
+# ───────────────────────── (3) val 에서만 도출하는 일반어 생략 규칙 ─────────────────────────
+# 절차: ① val 예측으로 mine_generic_words 를 돌려 후보를 본다 → ② 사람이 검토해 파일(JSON 리스트)로 동결한다
+#       → ③ 동결한 뒤에만 make_val_rule_scorer 로 test 를 한 번 채점한다. test 오답은 규칙 도출에 쓰지 않는다.
+def mine_generic_words(records, min_count=2):
+    """val 의 open 오답 중 '정답에서 단 한 단어만 빠져서' 틀린 경우를 모아, 그 단어를 빈도순으로 돌려준다.
+    반환: [(단어, 그 단어 하나 때문에 틀린 문항 수, 정답에 그 단어가 들어 있는 open 문항 수)]. 자동으로 규칙이 되지 않으며 사람이 검토해야 한다."""
+    miss, appear = Counter(), Counter()
+    for r in records:
+        if r['answer_type'] != 'OPEN':
+            continue
+        g, p = std_tokens(r['answer']), std_tokens(r['prediction'])
+        for w in set(g):
+            appear[w] += 1
+        gone = [w for w in set(g) if w not in set(p)]
+        if len(gone) == 1 and len(set(g)) > 1 and p:
+            miss[gone[0]] += 1
+    return sorted(((w, n, appear[w]) for w, n in miss.items() if n >= min_count), key=lambda x: -x[1])
+
+
+def make_val_rule_scorer(drop_words):
+    """동결한 일반어 목록을 양쪽에서 뺀 recall 과 'std' 점수 중 큰 값 (open 만). 원본보다 낮아지지 않는다."""
+    drop = set(drop_words)
+    def scorer(rec):
+        base = score_std(rec)
+        if rec['answer_type'] != 'OPEN':
+            return base
+        f = lambda L: [w for w in L if w not in drop] or L
+        return max(base, _llava_recall_from_tokens(f(std_tokens(rec['prediction'])), f(std_tokens(rec['answer']))))
+    return scorer
+
+
+def rule_overlap(drop_words):
+    """val 에서 도출한 규칙이 test 오답에서 도출한 기존 S1+S2 의 일반어 목록과 얼마나 겹치는지."""
+    a, b = set(drop_words), set(S1S2_REDUNDANT)
+    return {'val 도출': sorted(a), 'S1+S2': sorted(b), '겹침': sorted(a & b), 'S1+S2 에만': sorted(b - a)}
+
+
 def bootstrap_ci(records, scorer=score_phi, n_boot=10000, seed=0, alpha=0.05):
     """문항을 복원추출해 open / closed / overall 의 (평균, 하한, 상한) 을 돌려준다. 표본 크기만으로 생기는 변동 범위를 본다
     (학습 시드 변동은 포함하지 않는다). 반환: {'open': (m, lo, hi), 'closed': ..., 'overall': ...} (0~100)."""
