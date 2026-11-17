@@ -10,7 +10,9 @@ Phi-3.5V 쪽은 `Phi35V_results.md`(베이스라인)와 `RAG_CFG_results.md`(RAG
 | M3AE | VQA-RAD | paper 프로토콜, 마지막 epoch | 76.27 | 77.01 | −0.74 | 규칙 완화 | 이내 (규칙 준수 행은 **없음**) |
 | M3AE | SLAKE | 원 레포 코드 그대로 | 82.66 | 83.14 | −0.48 | 규칙 완화 | 이내 (규칙 준수 행은 **없음**) |
 | MUMC | VQA-RAD | clean, val 선택(ep28) | 73.39 (MUMC 자체 채점) | 79.20 | **−5.81** | 규칙 준수 | **미달** |
-| MUMC | SLAKE | val 선택 후보(ep22) | 84.45 (자체 채점) | 84.90 | −0.45 | 규칙 준수 (ep22가 val 최고인지는 미확정) | 이내 |
+| MUMC | SLAKE | val 선택(ep22, val 동점 22/37/38/39 중 이른 epoch) | 84.45 (자체 채점) | 84.90 | −0.45 | 규칙 준수 | 이내 |
+| MUMC | SLAKE | A: 원래 프로토콜(train+val 학습), 마지막 ep39 | 85.67 (자체 채점) | 84.90 | +0.77 | 규칙 완화 | 이내 |
+| MUMC | VQA-RAD | A: paper 프로토콜(train+val 학습, 후보에 test 정답), 마지막 ep39 | 73.39 (자체 채점; open 61.45 / closed 81.25) | 79.20 | **−5.81** (open −10.05) | 규칙 완화 | **미달** (후보·프로토콜로 설명되지 않음) |
 | LLaVA-Med | VQA-RAD | 공식 delta, greedy, closed 접미어 | 69.69 (S1+S2 70.02) | 75.19 | **−5.50** (−5.17) | 규칙 준수 (학습 없음) | **미달** |
 | LLaVA-Med | SLAKE | QLoRA 근사 (공식 delta 사용 불가) | 79.40 | 83.97 | **−4.57** | 규칙 준수 | **미달** |
 
@@ -64,7 +66,8 @@ Phi-3.5V 쪽은 `Phi35V_results.md`(베이스라인)와 `RAG_CFG_results.md`(RAG
 
 - val 최고 epoch는 `pre_answer` 기준으로 28(161)이고 29도 같은 점수지만 동점이면 앞선 epoch를 택하는 규칙이라 28이다. 다른 정규화(단순 소문자 비교)로 세면 29가 최고로 나와 28과 29는 사실상 구분되지 않는다(1문항 차이).
 - open **recall**(참조 채점)로는 ep28 63.17, ep39 64.00이다. ep28의 closed 83.09와 open recall 63.17을 문항 수로 가중하면 overall **약 75.2 (계산값, 논문 대비 약 −4.0)** 이다. 이전 정리에서 "MUMC VQA-RAD 약 −2.8"이라고 적은 값은 통일 채점(+S1+S2)의 값으로 보였지만 직접 재확인하지 못했다. **정확한 통일 채점 재계산이 아직 없다.**
-- `rad_common_paper`(규칙 완화) 결과는 채점하지 않았다. open 격차가 후보 목록(train+val+test 정답)과 관련 있다는 가설은 검증하지 않았다. `rad_common_paper_wrong_ep39.json`은 이름대로 잘못 만든 결과 파일로 보고 제외했다.
+- **`rad_common_paper`(규칙 완화)를 채점했다:** train+val 학습, 후보 train+val+test 정답(open 상한 100%)인데도 마지막 ep39가 open 61.45 / closed 81.25 / overall 73.39(−5.81)다. clean(ep28 open EM 58.66)보다 open이 +2.8만 올랐다. 저장된 test epoch(4, 9, …, 39) 중 최고도 ep39다. 따라서 open 격차(−10.05)는 후보 목록이나 학습 데이터로 설명되지 않는다. 같은 예측의 phi(recall 계열) 채점은 B의 clean ep28이 75.33(−3.87), 통일 채점(closed accuracy + open EM)은 73.39다. MUMC 공식 저장소는 사전학습 가중치만 공개하고 VQA-RAD · SLAKE 미세조정 하이퍼파라미터(epoch, lr, 배치)와 보고 epoch 선택 방식을 적지 않았다. 후보 상한(test open 정답이 후보에 있는 비율): train만 74.3%, train+val 78.2%, paper 방식 100%.
+- **MUMC 원 논문(arXiv 2307.05314) 대조 (PDF 본문 직접 확인):** Table 1의 MUMC는 VQA-RAD open 71.5 / closed 84.2 / overall 79.2, SLAKE overall 84.9로 `MODEL_RUN_GUIDE.md` 인용값과 같다. 지표는 accuracy이고 "생성한 답과 후보 목록 답의 유사도를 계산해 최고 점수를 최종 답으로 선택"한다고 적혀 있다. 미세조정 설정은 **30 epoch, 배치 8, AdamW, lr 2e-5에서 1e-8까지 감쇠, 이미지 256→384(위치 인코딩 보간)**이다. 레포의 `configs/VQA.yaml`은 batch_size_train 8, init_lr 2e-5, min_lr 1e-8, image_res 384, k_test 128로 논문과 같고 `max_epoch`만 40(우리 실행도 40)이다. 논문은 weight decay를 미세조정에 대해 따로 적지 않았다(사전학습 0.002, 레포 기본 0.05). VQA-RAD는 3,064문항 중 451이 test이고 val 사용은 적혀 있지 않으며, 보고 epoch 선택 방식도 적혀 있지 않다. 따라서 하이퍼파라미터 차이는 격차(−5.81)의 설명이 되지 않고, 남는 후보는 사전학습 체크포인트(공개된 `med_pretrain_29.pth`가 논문에서 쓴 것과 같은지 미확인), 시드, VQA-RAD 학습 분할(논문 분할이 3,064 중 어떻게 나뉘는지 미확인), 30 대 40 epoch다. `rad_common_paper_wrong_ep39.json`은 이름대로 잘못 만든 결과 파일로 보고 제외했다.
 
 **SLAKE 결과 (MUMC 자체 채점, `slake_val_sel/result/all_acc.json`)**
 
@@ -73,9 +76,10 @@ Phi-3.5V 쪽은 `Phi35V_results.md`(베이스라인)와 `RAG_CFG_results.md`(RAG
 | 파일 epoch 22 (val 최고 후보) | 80.00 | 91.35 | 84.45 | −0.45 |
 | 마지막 epoch 39 | 81.40 | 91.35 | 85.30 | +0.40 |
 
-- 22가 val 최고 epoch인지는 확정하지 못했다(`all_acc.json`에 val 점수가 없다). 근거는 test 파일 목록에서 22만 5의 배수가 아니라는 것과 노트북 로그의 "val 최고 epoch 22" 줄이다.
+- **val 최고 epoch 22는 val 결과 파일로 재계산해 확정했다**(`slake_val_sel/result/*_val_result_<epoch>.json`, val 1,053문항). 다만 epoch 22, 37, 38, 39가 모두 895로 동점이고 "동점이면 이른 epoch"라는 사전 규칙이 22를 골랐다. val은 17 epoch 이후 891~895로 평평해서 22와 39를 구분하지 못한다. 두 epoch의 test 차이는 0.85%p(약 9문항)이다.
 - test 점수는 epoch 5 이후 계속 오르는데(80.4 → 85.3) val 선택은 22를 골랐다. val과 test의 추세가 다르다. 논문에는 overall만 있어 open / closed 비교는 못 했다.
-- 원본 SLAKE 데이터가 현재 런타임에 없어서 통일 채점 재계산은 못 했다.
+- **A(논문 재현 판정, 이전 실행 `output/slake`: train+val 학습, 후보 train+val, MUMC 자체 채점):** 마지막 ep39 open 81.40 / closed 92.31 / overall **85.67 (+0.77)**, 저장된 test epoch(0, 4, …, 39) 중 최고 ep19 86.05 (+1.15, test로 고른 값). 규칙 완화 행이다.
+- 통일 채점(closed accuracy, open EM · F1): val 선택 ep22 closed 91.35 / open EM 82.02 / F1 86.95 / overall 85.67, 마지막 ep39 91.35 / 83.41 / 88.36 / 86.52. 자체 EM(84.45)보다 +1.22 높은 것은 정규화(관사 제거 등) 차이로 보이나 항목별로 분해하지 않았다.
 
 ## 4. LLaVA-Med 7B (생성형)
 
@@ -95,7 +99,8 @@ Phi-3.5V 쪽은 `Phi35V_results.md`(베이스라인)와 `RAG_CFG_results.md`(RAG
 
 - 신뢰구간(원본): open 59.57~72.49(논문 61.52 안), closed 66.54~77.21(논문 84.19 **밖**), overall 65.43~73.79(논문 75.19 **밖**).
 - **격차는 closed에서 나온다**(−12.13). open은 오히려 논문보다 +4.56 높다.
-- 부록 A(규칙 완화 행): closed 프롬프트 변형(C-17)과 yes/no 편향 보정(C-19)을 시도했다. 이 문서에는 그 결과를 정리하지 못했다(출력 미보유, 값 미확인).
+- 부록 A(규칙 완화 행, test 기반 탐색): 예전 아카이브 노트북(`LLaVA_Med_expert_cfg_reproduction.ipynb`)의 C-19 셀 출력에서 결과를 찾았다. yes/no 형태 248문항을 두 가지 선택지 순서로 추론해 보정한 결과, 기준(접미어 `[yes, no]`, greedy) closed 73.90%(yes/no 정답 190개)가 두 순서 평균 + prior 규칙으로 76.10%(196개), oracle 상한 76.84%(198개)였다. 가장 좋은 상한도 논문 closed 84.19에 닿지 않으므로 편향 보정이나 프롬프트 변형으로는 격차를 메우지 못한다. 이 출력의 기준 closed(73.90)는 현재 예측 파일의 phi closed(72.06)와 달라서 다른 실행으로 보이나 확인하지 못했다.
+- **closed 오답 분석(현재 예측 파일, VQA-RAD):** 정답이 yes/no인 251문항의 정확도 76.5%이고 오답 59건 중 50건이 "정답 no인데 yes로 답함"이다(예측 yes 63.3% 대 정답 yes 47.0%, yes 편향). 정답이 yes/no가 아닌 21문항("A or B" 질문)에는 접미어 `[yes, no]`가 붙어 `no`·`yes`로 답했다. LLaVA-Med 자체 평가 코드 이식본(closed는 예측에 yes/no가 있어야 정답)으로는 이 21문항이 모두 0점이라 closed 70.59, overall 68.65(−6.54), phi로는 closed 72.06, overall 69.69(−5.50)이다. SLAKE는 yes 편향이 없고(예측 yes 48.7% 대 정답 49.3%) 오답이 no→yes 37건, yes→no 39건으로 대칭이다.
 
 ### 4-2. SLAKE: QLoRA 근사 (공식 delta에 가중치가 없음)
 
@@ -108,7 +113,7 @@ Phi-3.5V 쪽은 `Phi35V_results.md`(베이스라인)와 `RAG_CFG_results.md`(RAG
 | QLoRA 근사, val 선택 | 75.72 | 약 81.8 | **79.40** | **−4.57** (closed 약 −9.6, open 약 −1.3) |
 
 - **yes/no 편향 보정(C-20, 부록 B)은 효과가 없었다.** yes/no 로그확률 임계값을 val로 정해 closed를 다시 판정했지만 재판정 대상 정답 수가 279 → 277 / 355(closed 75.72 → 75.24, overall 79.40 → 79.21)로 개선이 없었다. 선택지가 yes/no가 아닌 closed 문항은 36/61 정답이었다. 격차는 yes/no 편향이 아니라 정답 판단 자체의 정확도 문제로 보이며, QLoRA 근사의 한계로 추정한다(검증하지 않음).
-- 미확인: 79.40 행이 몇 epoch 학습에서 나왔는지(`FINAL_EPOCHS`가 설명 셀에는 6, 코드에는 9였고 체크포인트 `checkpoint-1842`가 6 epoch인지), 공식 delta는 9 epoch 학습이다.
+- **79.40 행은 6 epoch 학습이다(Drive 기록으로 확인).** `qlora_slake/final_proj/lr0.0002/run_info.json`이 epochs 6.0, max_steps 1842, n_train 4919, n_val 1053이고, best와 last 체크포인트가 모두 `checkpoint-1842`(global_step 1842, epoch 5.99)이다. val overall은 epoch 1~6이 66.20 → 71.76 → 74.88 → 77.32 → 80.13 → 80.30으로 계속 올라 최고가 마지막 epoch였다. 노트북 설정 셀의 `FINAL_EPOCHS = 9`는 실제 실행과 맞지 않아 6으로 고쳤다. 공식 delta는 9 epoch 학습이므로 학습 길이가 같지 않다. 1단계 학습률 탐색(2 epoch, val 400문항 부분집합)은 2e-4가 74.59, 1e-4가 74.07, 2e-5가 66.65였다.
 
 ## 5. 정리: 시도한 것과 남은 것
 

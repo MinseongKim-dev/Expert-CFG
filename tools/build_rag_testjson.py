@@ -93,29 +93,51 @@ def organ_hit(rows, seed=0):
 class KB:
     """검색 지식베이스: 텍스트, 출처(peir/roco/trainqa), 텍스트 피처, (PEIR 는 id, trainqa 는 원본 이미지 이름)."""
     def __init__(self):
-        self.texts, self.src, self.key, self.feats = [], [], [], []
+        self.texts, self.src, self.key, self.feats, self.img_feats = [], [], [], [], []
 
-    def add(self, texts, src, keys, feats):
+    def add(self, texts, src, keys, feats, img_feats=None):
+        """img_feats: 항목에 이미지가 있으면(trainqa) 그 이미지의 BiomedCLIP 피처 (union 검색의 이미지↔이미지 유사도에 쓴다)."""
         assert len(texts) == len(keys) == len(feats), (len(texts), len(keys), len(feats))
+        if img_feats is not None:
+            assert len(img_feats) == len(texts)
         self.texts += list(texts)
         self.src += [src] * len(texts)
         self.key += list(keys)
         self.feats.append(np.asarray(feats, dtype=np.float32))
+        self.img_feats.append(None if img_feats is None else np.asarray(img_feats, dtype=np.float32))
 
     def finalize(self):
         self.mat = np.concatenate(self.feats)
         assert len(self.mat) == len(self.texts)
+        self.img_mat = np.zeros_like(self.mat)
+        self.has_img = np.zeros(len(self.mat), dtype=bool)
+        off = 0
+        for f, imf in zip(self.feats, self.img_feats):
+            if imf is not None:
+                self.img_mat[off:off + len(f)] = imf
+                self.has_img[off:off + len(f)] = True
+            off += len(f)
         return self
 
-    def retrieve(self, qfeat, k=TOP_K):
-        return np.argsort(self.mat @ qfeat)[::-1][:k]
+    def retrieve(self, qfeat, k=TOP_K, qtxt=None, mode='cross'):
+        """mode='cross': 이미지 쿼리 x KB 텍스트 (기존 자체 검색).
+        mode='union' (팀원 phi3_urp · 논문 Table 2 Union 의 해석): max(이미지 유사도, 질문 텍스트 x KB 텍스트 유사도).
+          이미지 유사도 = 이미지가 있는 항목(trainqa)은 이미지↔이미지, 없는 항목(peir/roco)은 이미지→텍스트."""
+        s_img = self.mat @ qfeat
+        if mode == 'union':
+            assert qtxt is not None
+            s_img = np.where(self.has_img, self.img_mat @ qfeat, s_img)
+            score = np.maximum(s_img, self.mat @ qtxt)
+        else:
+            score = s_img
+        return np.argsort(score)[::-1][:k]
 
 
-def rows_with_rag(rows, qfeats, kb, hl_index, k=TOP_K):
+def rows_with_rag(rows, qfeats, kb, hl_index, k=TOP_K, qtxts=None, mode='cross'):
     """rows 각각에 top_k_captions / top_k_sources / highlights / top1_same_image 를 붙인다. 하이라이트는 정답을 쓰지 않는다."""
     out = []
-    for r in rows:
-        top = kb.retrieve(qfeats[r['img_id']], k)
+    for n, r in enumerate(rows):
+        top = kb.retrieve(qfeats[r['img_id']], k, qtxt=None if qtxts is None else qtxts[n], mode=mode)
         caps = [kb.texts[i] for i in top if kb.texts[i]]
         hls = []
         for i in top:
@@ -127,6 +149,18 @@ def rows_with_rag(rows, qfeats, kb, hl_index, k=TOP_K):
                     'highlights': list(dict.fromkeys(hls)),
                     'top1_same_image': bool(kb.src[t1] == 'trainqa' and kb.key[t1] == r['img_id'])})
     return out
+
+
+def paper_trainqa_groups(items):
+    """논문 §4.1 · 부록 B 와 팀원 phi3_urp(retrieval build) 방식: 같은 이미지의 train QA 를 한 항목으로 합치고,
+    답이 'no' 인 QA 는 뺀다. 문장은 "질문? 답." 형식(팀원의 qa_sentence 와 같음, GPT-4 문장화는 쓰지 않음).
+    items: (이미지 이름, 이미지 경로, 질문, 답). 반환: (이미지 이름, 이미지 경로, 합친 텍스트) 목록 (입력 순서 유지)."""
+    groups = {}
+    for name, path, q, a in items:
+        if str(a).strip().lower() == 'no':
+            continue
+        groups.setdefault((name, path), []).append(f"{str(q).strip().rstrip('?').strip()}? {str(a).strip()}.")
+    return [(n, p, ' '.join(sents)) for (n, p), sents in groups.items()]
 
 
 # ───────────────────────── 인코더 · 데이터 ─────────────────────────
@@ -222,11 +256,19 @@ def main():
     ap.add_argument('--out_dir', required=True)
     ap.add_argument('--kb', default='peir', help='peir, roco, trainqa 의 쉼표 조합')
     ap.add_argument('--roco_split', default='train')
+    ap.add_argument('--trainqa', choices=('pair', 'paper'), default='pair',
+                    help="pair: QA 한 쌍씩 '질문 답' (기존) / paper: 이미지별로 합치고 'no' 답 제외, '질문? 답.' 형식 (논문 · 팀원 방식)")
+    ap.add_argument('--retrieval', choices=('cross', 'union'), default='cross',
+                    help='cross: 이미지 쿼리 x 텍스트 (기존) / union: max(이미지 유사도, 질문 텍스트 유사도) (팀원 방식). union 은 trainqa 항목의 이미지를 인코딩한다')
+    ap.add_argument('--out_suffix', default='', help='출력 파일 이름 접미어 (예: _v2). 기존 결과 파일을 덮어쓰지 않기 위함')
+    ap.add_argument('--slake_img', default='/content/slake_data/imgs', help='SLAKE train 이미지 폴더 (trainqa=paper 에서 이미지 피처에 필요)')
     a = ap.parse_args()
     kbs = [x.strip() for x in a.kb.split(',') if x.strip()]
     assert kbs and set(kbs) <= {'peir', 'roco', 'trainqa'}, kbs
     tag = '_'.join(kbs)
-    suffix = '' if kbs == ['peir'] else f'_{tag}'
+    suffix = ('' if kbs == ['peir'] else f'_{tag}') + a.out_suffix
+    if a.retrieval == 'union':
+        assert 'trainqa' in kbs and a.trainqa == 'paper', 'union 검색은 이미지가 있는 trainqa=paper 항목이 있어야 의미가 있습니다'
 
     enc = Encoder()
     kb = KB()
@@ -248,10 +290,18 @@ def main():
         kb.add(caps, 'roco', [None] * len(caps), F); counts['roco'] = len(caps)
     if 'trainqa' in kbs:
         assert a.vqarad_train, '--vqarad_train 이 필요합니다'
-        qa = [(r['image_name'], f"{str(r['question']).strip()} {str(r['answer']).strip()}") for r in load_vqarad(a.vqarad_train)]
-        qa += [(r['img_name'], f"{str(r['question']).strip()} {str(r['answer']).strip()}") for r in slake_split('train')]
-        texts = [t for _, t in qa]
-        kb.add(texts, 'trainqa', [i for i, _ in qa], enc.text(texts)); counts['trainqa'] = len(texts)
+        if a.trainqa == 'paper':
+            items = [(r['image_name'], os.path.join(a.vqarad_img, r['image_name']), r['question'], r['answer']) for r in load_vqarad(a.vqarad_train)]
+            items += [(r['img_name'], os.path.join(a.slake_img, r['img_name']), r['question'], r['answer']) for r in slake_split('train')]
+            groups = paper_trainqa_groups(items)
+            texts = [t for _, _, t in groups]
+            imf = enc.images([pth for _, pth, _ in groups]) if a.retrieval == 'union' else None
+            kb.add(texts, 'trainqa', [n for n, _, _ in groups], enc.text(texts), imf); counts['trainqa'] = len(texts)
+        else:
+            qa = [(r['image_name'], f"{str(r['question']).strip()} {str(r['answer']).strip()}") for r in load_vqarad(a.vqarad_train)]
+            qa += [(r['img_name'], f"{str(r['question']).strip()} {str(r['answer']).strip()}") for r in slake_split('train')]
+            texts = [t for _, t in qa]
+            kb.add(texts, 'trainqa', [i for i, _ in qa], enc.text(texts)); counts['trainqa'] = len(texts)
     kb.finalize()
     print('KB 구성:', counts, '| 합계', len(kb.texts))
 
@@ -260,10 +310,13 @@ def main():
         return dict(zip(uniq, enc.images([os.path.join(img_root, u) for u in uniq])))
 
     meta = {'encoder': MID, 'top_k': TOP_K, 'kb': kbs, 'kb_counts': counts,
-            'method': '이미지 직접 인코딩 x KB 텍스트 인코딩, 코사인 top-k (자체 검색)'}
+            'method': '이미지 직접 인코딩 x KB 텍스트 인코딩, 코사인 top-k (자체 검색)' if a.retrieval == 'cross'
+                      else 'union = max(이미지 유사도, 질문 텍스트 유사도), 이미지 유사도는 trainqa 항목만 이미지↔이미지 (팀원 phi3_urp 방식 해석)',
+            'trainqa_style': a.trainqa, 'retrieval': a.retrieval}
     sl_rows, sl_img = slake_test_rows()
     for name, rows, img_root in (('vqarad', vqarad_test_rows(a.vqarad_common), a.vqarad_img), ('slake', sl_rows, sl_img)):
-        out = rows_with_rag(rows, encode_queries(rows, img_root), kb, hl_index)
+        qtxts = enc.text([str(r['question']) for r in rows]) if a.retrieval == 'union' else None
+        out = rows_with_rag(rows, encode_queries(rows, img_root), kb, hl_index, qtxts=qtxts, mode=a.retrieval)
         json.dump(out, open(f'{a.out_dir}/rag_{name}{suffix}.json', 'w', encoding='utf-8'), ensure_ascii=False)
         s = organ_hit(out)
         top1_src = {k: sum(r['top_k_sources'][0] == k for r in out) / len(out) for k in kbs}
